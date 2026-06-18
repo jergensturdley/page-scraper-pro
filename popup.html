@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Page Scraper Pro</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
+          <polyline points="7.5 12 12 16 16.5 12"/>
+        </svg>
+        <h1>Page Scraper Pro</h1>
+      </div>
+      <div class="header-actions">
+        <button class="settings-btn" id="detachBtn" title="Open as popup window">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </button>
+        <button class="settings-btn" id="sidebarBtn" title="Open in sidebar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <line x1="9" y1="3" x2="9" y2="21"/>
+          </svg>
+        </button>
+        <button class="settings-btn" id="settingsBtn" title="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="url-bar">
+        <span class="url-label">Current Page</span>
+        <span class="url-text" id="currentPage">Loading...</span>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon images">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="imageCount">0</span>
+            <span class="stat-label">Images</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon videos">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="23 7 16 12 23 17 23 7"/>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="videoCount">0</span>
+            <span class="stat-label">Videos</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon audios">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 18V5l12-2v13"/>
+              <circle cx="6" cy="18" r="3"/>
+              <circle cx="18" cy="16" r="3"/>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="audioCount">0</span>
+            <span class="stat-label">Audio</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon links">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10 6H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>
+              <path d="M14 10l8-8"/>
+              <path d="M14 2v6h6"/>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="linkCount">0</span>
+            <span class="stat-label">Links</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="scrapeBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
+            <polyline points="7.5 12 12 16 16.5 12"/>
+          </svg>
+          Scrape Page Data
+        </button>
+        <button class="btn btn-secondary" id="copyBtn" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          Copy Results
+        </button>
+      </div>
+
+      <div class="filter-buttons">
+        <button class="filter-chip active" data-filter="all" title="Show all images">All</button>
+        <button class="filter-chip" data-filter="large" title="Images > 200x200">Large</button>
+        <button class="filter-chip" data-filter="xlarge" title="Images > 500x500">XL</button>
+        <button class="filter-chip" data-filter="domain" title="Filter by domain">Domain</button>
+      </div>
+
+      <div class="tabs">
+        <div class="tab-list">
+          <button class="tab-btn active" data-tab="images">Images</button>
+          <button class="tab-btn" data-tab="videos">Videos</button>
+          <button class="tab-btn" data-tab="audios">Audio</button>
+          <button class="tab-btn" data-tab="links">Links</button>
+          <button class="tab-btn" data-tab="text">Text</button>
+        </div>
+
+        <div class="selection-toolbar" id="selectionToolbar">
+          <span class="selection-info" id="selectionInfo">0 selected</span>
+          <div class="selection-actions">
+            <button class="select-all-btn" id="selectAllBtn">Select All</button>
+            <button class="download-selected-btn" id="openPanelBtn">Download</button>
+          </div>
+        </div>
+
+        <div class="tab-content">
+          <div class="tab-pane active" id="imagesTab">
+            <div class="results-header">
+              <span class="results-count" id="imagesCount">0 images</span>
+              <div class="filter-row">
+                <input type="text" id="imageFilter" placeholder="Filter..." class="filter-input">
+                <button class="copy-tab-btn" data-type="images" title="Copy all image URLs">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="results-container" id="imagesContainer">
+              <div class="empty-state">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                  <circle cx="8.5" cy="8.5" r="1.5"/>
+                  <polyline points="21 15 16 10 5 21"/>
+                </svg>
+                <p>No images found</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="videosTab">
+            <div class="results-header">
+              <span class="results-count" id="videosCount">0 videos</span>
+              <button class="copy-tab-btn" data-type="videos" title="Copy all video URLs">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+            </div>
+            <div class="results-container" id="videosContainer">
+              <div class="empty-state">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                  <polygon points="23 7 16 12 23 17 23 7"/>
+                  <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                </svg>
+                <p>No videos found</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="audiosTab">
+            <div class="results-header">
+              <span class="results-count" id="audiosCount">0 audio</span>
+              <button class="copy-tab-btn" data-type="audios" title="Copy all audio URLs">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+            </div>
+            <div class="results-container" id="audiosContainer">
+              <div class="empty-state">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                  <path d="M9 18V5l12-2v13"/>
+                  <circle cx="6" cy="18" r="3"/>
+                  <circle cx="18" cy="16" r="3"/>
+                </svg>
+                <p>No audio found</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="linksTab">
+            <div class="results-header">
+              <span class="results-count" id="linksCount">0 links</span>
+              <div class="filter-row">
+                <input type="text" id="linkFilter" placeholder="Filter..." class="filter-input">
+                <button class="copy-tab-btn" data-type="links" title="Copy all links">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="results-container" id="linksContainer">
+              <div class="empty-state">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                  <path d="M10 6H6a2 2 0 0 1-2 2v12a2 2 0 0 1 2 2h12a2 2 0 0 1 2-2v-4"/>
+                  <path d="M14 10l8-8"/>
+                  <path d="M14 2v6h6"/>
+                </svg>
+                <p>No links found</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="textTab">
+            <div class="results-header">
+              <span class="results-count" id="textResultsCount">0 words</span>
+              <button class="copy-tab-btn" data-type="text" title="Copy page text">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+            </div>
+            <div class="results-container" id="textContainer">
+              <div class="empty-state">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                  <line x1="17" y1="10" x2="3" y2="10"/>
+                  <line x1="21" y1="6" x2="3" y2="6"/>
+                  <line x1="21" y1="14" x2="3" y2="14"/>
+                  <line x1="17" y1="18" x2="3" y2="18"/>
+                </svg>
+                <p>No text content</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="status" id="status">Ready</div>
+      <div class="export-buttons">
+        <button class="btn-small" id="exportJson" title="Export JSON">JSON</button>
+        <button class="btn-small" id="exportImages" title="Download images">IMG</button>
+        <button class="btn-small" id="exportVideos" title="Download videos">VID</button>
+        <button class="btn-small" id="exportAudios" title="Download audio">AUD</button>
+        <button class="btn-small" id="exportArchive" title="Export ZIP">ZIP</button>
+        <button class="btn-small" id="copyImageUrls" title="Copy URLs">URL</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Download Panel (slide-out) -->
+  <div class="download-panel" id="downloadPanel">
+    <div class="download-panel-header">
+      <h3>Download Selected</h3>
+      <button class="close-panel-btn" id="closePanelBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="download-panel-controls">
+      <button id="clearSelectionBtn">Clear All</button>
+      <button class="download-confirm-btn" id="downloadConfirmBtn">Download</button>
+    </div>
+    <div class="download-panel-list" id="downloadPanelList"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
