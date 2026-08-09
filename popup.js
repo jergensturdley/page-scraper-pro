@@ -340,10 +340,12 @@ async function scrapePageData() {
       elements.currentPage.textContent = currentTabUrl || 'Unknown page';
     }
 
-    // Use chrome.scripting.executeScript directly (Manifest V3)
+    // Pass a snapshot because injected functions do not share the popup context.
+    const scrapeSettings = { ...settings };
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: scrapePageFromContentFallback
+      func: scrapePageFromContentFallback,
+      args: [scrapeSettings]
     });
     
     if (results && results[0] && results[0].result) {
@@ -393,7 +395,22 @@ function updateUI() {
 }
 
 // Fallback scrape function for scripting API
-function scrapePageFromContentFallback() {
+function scrapePageFromContentFallback(scrapeSettings) {
+  const defaults = {
+    minSize: false,
+    minWidth: 100,
+    minHeight: 100,
+    excludeNav: true
+  };
+  const suppliedSettings = scrapeSettings && typeof scrapeSettings === 'object' ? scrapeSettings : {};
+  const minWidth = Number(suppliedSettings.minWidth);
+  const minHeight = Number(suppliedSettings.minHeight);
+  const normalizedSettings = {
+    minSize: suppliedSettings.minSize === true,
+    minWidth: Number.isFinite(minWidth) && minWidth > 0 ? minWidth : defaults.minWidth,
+    minHeight: Number.isFinite(minHeight) && minHeight > 0 ? minHeight : defaults.minHeight,
+    excludeNav: suppliedSettings.excludeNav === undefined ? defaults.excludeNav : suppliedSettings.excludeNav === true
+  };
   const images = [];
   const videos = [];
   const audios = [];
@@ -409,6 +426,7 @@ function scrapePageFromContentFallback() {
     const height = img.naturalHeight || img.height || 0;
     
     if (width < 10 || height < 10) return;
+    if (normalizedSettings.minSize && (width < normalizedSettings.minWidth || height < normalizedSettings.minHeight)) return;
     if (src.startsWith('data:') && src.length > 50000) return;
     
     if (!images.some(i => i.src === src)) {
@@ -486,6 +504,7 @@ function scrapePageFromContentFallback() {
     
     if (!href || href.startsWith('javascript:') || href.startsWith('#')) return;
     if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
+    if (normalizedSettings.excludeNav && link.closest('nav, [role="navigation"], .nav, .navigation')) return;
     
     if (!links.some(l => l.href === href)) {
       links.push({ href, text });

@@ -178,3 +178,93 @@ describe('Popup UI Bug Fixes', () => {
   });
 
 });
+
+
+describe('Scraper settings injection', () => {
+  function loadFallbackScraper(document) {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function scrapePageFromContentFallback(');
+    const end = popupJs.indexOf('// Render images', start);
+    const context = { document };
+    vm.runInNewContext(`${popupJs.slice(start, end)}\nthis.scrape = scrapePageFromContentFallback;`, context);
+    return context.scrape;
+  }
+
+  function createDocument({ images = [], links = [] } = {}) {
+    return {
+      querySelectorAll(selector) {
+        if (selector.startsWith('img[')) return images;
+        if (selector === 'a[href]') return links;
+        return [];
+      },
+      body: {
+        cloneNode() {
+          return {
+            querySelectorAll() { return []; },
+            innerText: ''
+          };
+        }
+      }
+    };
+  }
+
+  function image(src, width, height) {
+    return { src, dataset: {}, naturalWidth: width, naturalHeight: height, alt: '', title: '' };
+  }
+
+  function link(href, inNavigation = false) {
+    return {
+      href,
+      innerText: href,
+      closest() { return inNavigation ? {} : null; }
+    };
+  }
+
+  test('passes a snapshot of persisted settings to the injected fallback scraper', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const scrapeFunction = popupJs.slice(
+      popupJs.indexOf('async function scrapePageData()'),
+      popupJs.indexOf('// Update UI with scraped data')
+    );
+
+    expect(scrapeFunction).toContain('const scrapeSettings = { ...settings };');
+    expect(scrapeFunction).toContain('func: scrapePageFromContentFallback');
+    expect(scrapeFunction).toContain('args: [scrapeSettings]');
+  });
+
+  test('enforces the technical image minimum and enabled configured minimum dimensions', () => {
+    const scrape = loadFallbackScraper(createDocument({
+      images: [image('https://example.com/tiny.png', 9, 100), image('https://example.com/technical.png', 10, 10), image('https://example.com/small.png', 99, 100), image('https://example.com/large.png', 100, 100)]
+    }));
+
+    expect(scrape({ minSize: false }).images.map(({ src }) => src)).toEqual([
+      'https://example.com/technical.png',
+      'https://example.com/small.png',
+      'https://example.com/large.png'
+    ]);
+    expect(scrape({ minSize: true, minWidth: 100, minHeight: 100 }).images.map(({ src }) => src)).toEqual([
+      'https://example.com/large.png'
+    ]);
+  });
+
+  test('normalizes missing scraper settings before extracting page data', () => {
+    const scrape = loadFallbackScraper(createDocument({
+      images: [image('https://example.com/valid.png', 10, 10)]
+    }));
+
+    expect(scrape(null).images).toHaveLength(1);
+    expect(scrape({ minSize: true, minWidth: 'bad', minHeight: null }).images).toHaveLength(0);
+  });
+
+  test('excludes only navigation links when excludeNav is enabled', () => {
+    const scrape = loadFallbackScraper(createDocument({
+      links: [link('https://example.com/nav', true), link('https://example.com/content')]
+    }));
+
+    expect(scrape({ excludeNav: true }).links.map(({ href }) => href)).toEqual(['https://example.com/content']);
+    expect(scrape({ excludeNav: false }).links.map(({ href }) => href)).toEqual([
+      'https://example.com/nav',
+      'https://example.com/content'
+    ]);
+  });
+});
