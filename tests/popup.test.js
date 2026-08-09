@@ -17,7 +17,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, buildExportData };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData };`, context);
   return context.popupHelpers;
 }
 
@@ -209,12 +209,53 @@ describe('Rendered video security and controls', () => {
   test('provides an Open video link for every rendered video by default', () => {
     const source = renderVideosSource();
     const openLinkIndex = source.indexOf("openLink.textContent = 'Open video'");
-    const previewBranchIndex = source.indexOf("if (video.type === 'embed')");
+    const previewBranchIndex = source.indexOf('let videoPreviewEl = null;');
 
     expect(openLinkIndex).toBeGreaterThan(-1);
     expect(previewBranchIndex).toBeGreaterThan(-1);
     expect(openLinkIndex).toBeLessThan(previewBranchIndex);
   });
+
+  test('shows an accessible fallback when no video preview can be resolved', () => {
+    const source = renderVideosSource();
+
+    expect(source).toContain("fallback.className = 'video-preview-fallback'");
+    expect(source).toContain("fallback.textContent = 'Video preview unavailable'");
+    expect(source).toContain('wrapper.appendChild(fallback)');
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+    const fallbackRule = getRule(styles, '.video-preview-fallback');
+    expect(fallbackRule).not.toBeNull();
+    expect(declarations(fallbackRule).display).toBe('flex');
+  });
+
+  test('accepts only HTTP(S) URLs for video links', () => {
+    const { normalizeVideoUrl } = loadPopupHelpers();
+
+    expect(normalizeVideoUrl('https://example.com/video.mp4')).toBe('https://example.com/video.mp4');
+    expect(normalizeVideoUrl('http://example.com/video.mp4')).toBe('http://example.com/video.mp4');
+    expect(normalizeVideoUrl('javascript:alert(1)')).toBe('');
+    expect(normalizeVideoUrl('data:text/html,unsafe')).toBe('');
+    expect(normalizeVideoUrl('not a URL')).toBe('');
+    expect(normalizeVideoUrl(null)).toBe('');
+  });
+
+  test('uses normalized video URLs before assigning anchor hrefs', () => {
+    const source = renderVideosSource();
+
+    expect(source).toContain('const videoUrl = normalizeVideoUrl(video.src);');
+    expect(source).toContain('if (videoUrl) {');
+    expect(source).toContain('openLink.href = videoUrl;');
+    expect(source).toContain('previewLink.href = videoUrl;');
+  });
+
+  test('video overlays do not intercept preview link clicks', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+    const overlayRule = getRule(styles, '.video-overlay');
+
+    expect(overlayRule).not.toBeNull();
+    expect(declarations(overlayRule)['pointer-events']).toBe('none');
+  });
+
 });
 
 describe('Scraper settings injection', () => {

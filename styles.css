@@ -626,6 +626,23 @@ body.sidebar-mode {
   cursor: pointer;
 }
 
+.video-preview-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.video-preview-fallback {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
 .video-overlay {
   position: absolute;
   inset: 0;
@@ -636,6 +653,7 @@ body.sidebar-mode {
   align-items: flex-end;
   justify-content: space-between;
   padding: 4px;
+  pointer-events: none;
 }
 
 .video-wrapper:hover .video-overlay {

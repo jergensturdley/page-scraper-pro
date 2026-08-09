@@ -47,6 +47,17 @@ function getVideoProviderId(url) {
   return null;
 }
 
+function normalizeVideoUrl(value) {
+  if (typeof value !== 'string') return '';
+
+  try {
+    const parsedUrl = new URL(value);
+    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:' ? parsedUrl.href : '';
+  } catch (error) {
+    return '';
+  }
+}
+
 function buildExportData(url, data) {
   return {
     url,
@@ -712,6 +723,8 @@ function renderVideos() {
   grid.className = 'video-grid';
 
   scrapedData.videos.forEach((video) => {
+    const rawVideoUrl = typeof video.src === 'string' ? video.src : '';
+    const videoUrl = normalizeVideoUrl(video.src);
     const item = document.createElement('div');
     item.className = 'video-item';
 
@@ -721,7 +734,7 @@ function renderVideos() {
     overlay.className = 'video-overlay';
     const type = document.createElement('span');
     type.className = 'video-type';
-    type.textContent = video.type || 'video';
+    type.textContent = typeof video.type === 'string' && video.type ? video.type : 'video';
     overlay.appendChild(type);
 
     if (video.width > 0 && video.height > 0) {
@@ -735,15 +748,19 @@ function renderVideos() {
     info.className = 'video-info';
     const url = document.createElement('span');
     url.className = 'video-url';
-    url.title = video.src;
-    url.textContent = video.src.length > 40 ? `${video.src.substring(0, 40)}...` : video.src;
+    url.title = rawVideoUrl;
+    url.textContent = rawVideoUrl.length > 40 ? `${rawVideoUrl.substring(0, 40)}...` : rawVideoUrl;
 
     const openLink = document.createElement('a');
     openLink.className = 'open-video-link';
-    openLink.href = video.src;
     openLink.target = '_blank';
     openLink.rel = 'noopener';
     openLink.textContent = 'Open video';
+    if (videoUrl) {
+      openLink.href = videoUrl;
+    } else {
+      openLink.setAttribute('aria-disabled', 'true');
+    }
 
     const copyBtn = document.createElement('button');
     copyBtn.className = 'copy-video-btn';
@@ -751,13 +768,13 @@ function renderVideos() {
     copyBtn.setAttribute('aria-label', 'Copy video URL');
     copyBtn.textContent = 'Copy';
     copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(video.src);
+      navigator.clipboard.writeText(rawVideoUrl);
       showToast('Video URL copied!');
     });
 
     let videoPreviewEl = null;
-    if (video.type === 'embed') {
-      const embedUrl = video.src;
+    if (typeof video.type === 'string' && video.type === 'embed' && videoUrl) {
+      const embedUrl = videoUrl;
       const videoProvider = getVideoProviderId(embedUrl);
       const isYouTube = videoProvider?.provider === 'youtube' || embedUrl.includes('youtube');
       const isVimeo = videoProvider?.provider === 'vimeo' || embedUrl.includes('vimeo');
@@ -780,27 +797,36 @@ function renderVideos() {
           videoPreviewEl.src = `https://vumbnail.com/${videoId}.jpg`;
           videoPreviewEl.alt = 'Video thumbnail';
         }
-      } else if (video.poster) {
-        videoPreviewEl = document.createElement('img');
-        videoPreviewEl.src = video.poster;
-        videoPreviewEl.alt = 'Video thumbnail';
+      } else {
+        const posterUrl = normalizeVideoUrl(video.poster);
+        if (posterUrl) {
+          videoPreviewEl = document.createElement('img');
+          videoPreviewEl.src = posterUrl;
+          videoPreviewEl.alt = 'Video thumbnail';
+        }
       }
-    } else {
+    } else if (videoUrl) {
       videoPreviewEl = document.createElement('video');
-      videoPreviewEl.src = video.src;
-      videoPreviewEl.poster = video.poster || '';
+      videoPreviewEl.src = videoUrl;
+      videoPreviewEl.poster = normalizeVideoUrl(video.poster);
       videoPreviewEl.preload = 'metadata';
     }
 
     if (videoPreviewEl) {
       const previewLink = document.createElement('a');
       previewLink.className = 'video-preview-link';
-      previewLink.href = video.src;
+      previewLink.href = videoUrl;
       previewLink.target = '_blank';
       previewLink.rel = 'noopener';
       previewLink.setAttribute('aria-label', 'Open video preview');
       previewLink.appendChild(videoPreviewEl);
       wrapper.appendChild(previewLink);
+    } else {
+      const fallback = document.createElement('div');
+      fallback.className = 'video-preview-fallback';
+      fallback.textContent = 'Video preview unavailable';
+      fallback.setAttribute('role', 'status');
+      wrapper.appendChild(fallback);
     }
     wrapper.appendChild(overlay);
     info.append(url, openLink, copyBtn);
