@@ -6,6 +6,7 @@ const path = require('path');
 
 const stylesPath = path.join(__dirname, '..', 'styles.css');
 const popupJsPath = path.join(__dirname, '..', 'popup.js');
+const backgroundJsPath = path.join(__dirname, '..', 'background.js');
 const manifestPath = path.join(__dirname, '..', 'manifest.json');
 
 function getRule(css, selector) {
@@ -56,7 +57,8 @@ describe('Popup UI Bug Fixes', () => {
       expect(bodyRule).not.toBeNull();
       const body = declarations(bodyRule);
       expect(body.width).toBe('520px');
-      expect(body['min-height']).toBe('700px');
+      expect(body.height).toBe('600px');
+      expect(body['min-height']).toBe('0');
     });
 
     test('popup.js has no duplicate function definitions', () => {
@@ -82,20 +84,13 @@ describe('Popup UI Bug Fixes', () => {
 
   describe('T2: Regression - Popup Expansion Bug', () => {
 
-    test('container should not have fixed height: 100vh', () => {
+    test('container is constrained to the popup viewport', () => {
       const styles = fs.readFileSync(stylesPath, 'utf8');
       const containerRule = getRule(styles, '.container');
       expect(containerRule).not.toBeNull();
       const container = declarations(containerRule);
-      expect(container.height).toBeUndefined();
-    });
-
-    test('container should have min-height: 100vh for expansion support', () => {
-      const styles = fs.readFileSync(stylesPath, 'utf8');
-      const containerRule = getRule(styles, '.container');
-      expect(containerRule).not.toBeNull();
-      const container = declarations(containerRule);
-      expect(container['min-height']).toBe('100vh');
+      expect(container.height).toBe('100%');
+      expect(container['min-height']).toBe('0');
     });
 
     test('sidebarBtn is defined in elements object before detectSidebarMode call', () => {
@@ -103,6 +98,18 @@ describe('Popup UI Bug Fixes', () => {
       const elementsBlock = popupJs.match(/const elements = \{[\s\S]*?\};/);
       expect(elementsBlock).not.toBeNull();
       expect(elementsBlock[0]).toContain('sidebarBtn');
+    });
+
+  });
+
+  describe('T3: Regression - Image Downloads', () => {
+
+    test('background handles image batches and keeps the response channel open', () => {
+      const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+      const handler = backgroundJs.match(/if \(request\.action === 'downloadFiles'[\s\S]*?return true;/);
+      expect(handler).not.toBeNull();
+      expect(handler[0]).toContain('downloadFiles(items)');
+      expect(handler[0]).toContain('sendResponse');
     });
 
   });

@@ -942,12 +942,11 @@ async function exportVideos() {
     return;
   }
   
-  showToast(`Downloading ${scrapedData.videos.length} videos...`);
-  
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const baseUrl = tab.url;
-    
+    const files = [];
+
     for (let i = 0; i < scrapedData.videos.length; i++) {
       const video = scrapedData.videos[i];
       let videoUrl = video.src;
@@ -971,19 +970,10 @@ async function exportVideos() {
         continue;
       }
       
-      const filename = `video-${i + 1}.mp4`;
-      
-      chrome.downloads.download({
-        url: videoUrl,
-        filename: filename,
-        saveAs: false
-      });
-      
-      // Small delay to prevent overwhelming
-      await new Promise(resolve => setTimeout(resolve, 200));
+      files.push({ url: videoUrl, filename: `video-${i + 1}.mp4` });
     }
-    
-    showToast(`${scrapedData.videos.length} videos downloaded!`);
+
+    await requestDownloads(files, 'videos');
   } catch (error) {
     console.error('Video download error:', error);
     showToast('Error downloading videos: ' + error.message);
@@ -997,12 +987,11 @@ async function exportAudios() {
     return;
   }
   
-  showToast(`Downloading ${scrapedData.audios.length} audio files...`);
-  
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const baseUrl = tab.url;
-    
+    const files = [];
+
     for (let i = 0; i < scrapedData.audios.length; i++) {
       const audio = scrapedData.audios[i];
       let audioUrl = audio.src;
@@ -1030,20 +1019,29 @@ async function exportAudios() {
       
       const filename = `audio-${i + 1}${ext}`;
       
-      chrome.downloads.download({
-        url: audioUrl,
-        filename: filename,
-        saveAs: false
-      });
-      
-      await new Promise(resolve => setTimeout(resolve, 200));
+      files.push({ url: audioUrl, filename });
     }
-    
-    showToast(`${scrapedData.audios.length} audio files downloaded!`);
+
+    await requestDownloads(files, 'audio files');
   } catch (error) {
     console.error('Audio download error:', error);
     showToast('Error downloading audio: ' + error.message);
   }
+}
+
+async function requestDownloads(files, label) {
+  if (files.length === 0) {
+    showToast(`No downloadable ${label}`);
+    return null;
+  }
+
+  showToast(`Downloading ${files.length} ${label}...`);
+  const response = await chrome.runtime.sendMessage({ action: 'downloadFiles', files });
+  if (!response) throw new Error('Download service did not respond');
+  showToast(response.failed
+    ? `Downloaded ${response.downloaded}; ${response.failed} failed`
+    : `${response.downloaded} ${label} downloaded!`);
+  return response;
 }
 
 // Download images individually
@@ -1053,24 +1051,15 @@ async function downloadImagesIndividually() {
     return;
   }
   
-  showToast(`Downloading ${scrapedData.images.length} images...`);
-  
   try {
-    for (let i = 0; i < scrapedData.images.length; i++) {
-      const img = scrapedData.images[i];
-      const filename = img.alt ? `${sanitizeFilename(img.alt.substring(0, 50))}.jpg` : `image-${i}.jpg`;
-      
-      chrome.downloads.download({
+    await requestDownloads(
+      scrapedData.images.map((img, index) => ({
         url: img.src,
-        filename: filename,
-        saveAs: false
-      });
-      
-      // Small delay to prevent overwhelming
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-    
-    showToast(`${scrapedData.images.length} images downloaded!`);
+        filename: img.alt ? sanitizeFilename(img.alt.substring(0, 50)) : `image-${index + 1}`,
+        defaultExtension: '.jpg'
+      })),
+      'images'
+    );
   } catch (error) {
     console.error('Download error:', error);
     showToast('Error downloading images: ' + error.message);
@@ -1697,18 +1686,14 @@ async function downloadSelectedImages() {
 
   const urls = Array.from(selectedImages);
   try {
-    const response = await chrome.runtime.sendMessage({
-      action: 'downloadImages',
-      images: urls
-    });
-    if (response?.success) {
-      showToast(`Downloading ${urls.length} images`);
-    } else {
-      showToast('Download started');
-    }
-  } catch {
-    urls.forEach(url => window.open(url, '_blank'));
-    showToast(`Opening ${urls.length} images`);
+    const response = await requestDownloads(
+      urls.map(url => ({ url, defaultExtension: '.jpg' })),
+      'images'
+    );
+    if (response?.downloaded) closeDownloadPanel();
+  } catch (error) {
+    console.error('Selected downloads failed:', error);
+    showToast('Downloads failed: ' + error.message);
   }
 }
 

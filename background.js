@@ -136,6 +136,48 @@ chrome.downloads.onChanged.addListener((delta) => {
   }
 });
 
+function downloadFile(item, index) {
+  if (!item?.url) {
+    return Promise.resolve({ success: false, error: 'Missing download URL' });
+  }
+
+  return new Promise((resolve) => {
+    let filename = item.filename;
+    if (!filename) {
+      try {
+        filename = decodeURIComponent(new URL(item.url).pathname.split('/').pop());
+      } catch {}
+    }
+    filename = (filename || `image-${index + 1}.jpg`)
+      .replace(/[^a-z0-9._-]/gi, '_')
+      .slice(0, 180);
+    if (!/\.[a-z0-9]{2,5}$/i.test(filename)) {
+      let extension = '';
+      try {
+        extension = new URL(item.url).pathname.match(/\.[a-z0-9]{2,5}$/i)?.[0] || '';
+      } catch {}
+      filename += extension || item.defaultExtension || '';
+    }
+
+    try {
+      chrome.downloads.download({ url: item.url, filename, saveAs: false }, (id) => {
+        const error = chrome.runtime.lastError?.message;
+        resolve(error ? { success: false, error } : { success: true, id });
+      });
+    } catch (error) {
+      resolve({ success: false, error: error.message });
+    }
+  });
+}
+
+async function downloadFiles(items) {
+  const results = [];
+  for (let i = 0; i < items.length; i++) {
+    results.push(await downloadFile(items[i], i));
+  }
+  return results;
+}
+
 // Listen for messages from popup or content script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'showNotification') {
@@ -168,18 +210,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   
   if (request.action === 'downloadImage') {
-    console.log('downloadImage received:', request.url);
-    chrome.downloads.download({
-      url: request.url,
-      filename: request.filename,
-      saveAs: false
-    }, (id) => {
-      if (chrome.runtime.lastError) {
-        console.error('Download failed:', chrome.runtime.lastError);
-      } else {
-        console.log('Download started:', id);
-      }
+    downloadFile({ url: request.url, filename: request.filename }, 0)
+      .then(sendResponse);
+    return true;
+  }
+
+  if (request.action === 'downloadFiles' || request.action === 'downloadImages') {
+    const requestedItems = request.files || request.images;
+    const items = Array.isArray(requestedItems)
+      ? requestedItems.map(item => typeof item === 'string' ? { url: item } : item)
+      : [];
+    downloadFiles(items).then((results) => {
+      const failed = results.filter(result => !result.success);
+      sendResponse({
+        success: failed.length === 0,
+        downloaded: results.length - failed.length,
+        failed: failed.length,
+        error: failed[0]?.error
+      });
     });
+    return true;
   }
   
   if (request.action === 'scrapePage') {
