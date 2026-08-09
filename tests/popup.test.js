@@ -256,6 +256,26 @@ describe('Scraper settings injection', () => {
     expect(scrape({ minSize: true, minWidth: 'bad', minHeight: null }).images).toHaveLength(0);
   });
 
+  test('accepts a nonempty numeric-string image threshold', () => {
+    const scrape = loadFallbackScraper(createDocument({
+      images: [image('https://example.com/below.png', 99, 100), image('https://example.com/at-threshold.png', 100, 100)]
+    }));
+
+    expect(scrape({ minSize: true, minWidth: '100', minHeight: '100' }).images.map(({ src }) => src)).toEqual([
+      'https://example.com/at-threshold.png'
+    ]);
+  });
+
+  test.each([true, [25], ''])('defaults invalid minWidth %p to 100', (minWidth) => {
+    const scrape = loadFallbackScraper(createDocument({
+      images: [image('https://example.com/below-default.png', 50, 100), image('https://example.com/at-default.png', 100, 100)]
+    }));
+
+    expect(scrape({ minSize: true, minWidth, minHeight: 100 }).images.map(({ src }) => src)).toEqual([
+      'https://example.com/at-default.png'
+    ]);
+  });
+
   test('excludes only navigation links when excludeNav is enabled', () => {
     const scrape = loadFallbackScraper(createDocument({
       links: [link('https://example.com/nav', true), link('https://example.com/content')]

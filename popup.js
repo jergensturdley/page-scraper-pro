@@ -403,12 +403,18 @@ function scrapePageFromContentFallback(scrapeSettings) {
     excludeNav: true
   };
   const suppliedSettings = scrapeSettings && typeof scrapeSettings === 'object' ? scrapeSettings : {};
-  const minWidth = Number(suppliedSettings.minWidth);
-  const minHeight = Number(suppliedSettings.minHeight);
+  const normalizeDimension = (value, fallback) => {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+    if (typeof value === 'string' && value.trim() !== '') {
+      const numericValue = Number(value);
+      if (Number.isFinite(numericValue) && numericValue > 0) return numericValue;
+    }
+    return fallback;
+  };
   const normalizedSettings = {
     minSize: suppliedSettings.minSize === true,
-    minWidth: Number.isFinite(minWidth) && minWidth > 0 ? minWidth : defaults.minWidth,
-    minHeight: Number.isFinite(minHeight) && minHeight > 0 ? minHeight : defaults.minHeight,
+    minWidth: normalizeDimension(suppliedSettings.minWidth, defaults.minWidth),
+    minHeight: normalizeDimension(suppliedSettings.minHeight, defaults.minHeight),
     excludeNav: suppliedSettings.excludeNav === undefined ? defaults.excludeNav : suppliedSettings.excludeNav === true
   };
   const images = [];
