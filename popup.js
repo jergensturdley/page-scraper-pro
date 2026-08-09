@@ -30,11 +30,14 @@ function getVideoProviderId(url) {
     const parsedUrl = new URL(url);
     const pathParts = parsedUrl.pathname.split('/').filter(Boolean);
 
-    if (parsedUrl.hostname.endsWith('youtube.com') && pathParts[0] === 'embed' && pathParts[1]) {
+    const isYouTube = parsedUrl.hostname === 'youtube.com' || parsedUrl.hostname.endsWith('.youtube.com');
+    const isVimeo = parsedUrl.hostname === 'vimeo.com' || parsedUrl.hostname.endsWith('.vimeo.com');
+
+    if (isYouTube && pathParts[0] === 'embed' && pathParts[1]) {
       return { provider: 'youtube', id: pathParts[1] };
     }
 
-    if (parsedUrl.hostname.endsWith('vimeo.com') && pathParts[0] === 'video' && pathParts[1]) {
+    if (isVimeo && pathParts[0] === 'video' && pathParts[1]) {
       return { provider: 'vimeo', id: pathParts[1] };
     }
   } catch (error) {
@@ -328,7 +331,15 @@ async function scrapePageData() {
     if (!tab?.id) {
       throw new Error('No active tab');
     }
-    
+
+    currentTabUrl = tab.url || '';
+    try {
+      const url = new URL(currentTabUrl);
+      elements.currentPage.textContent = url.hostname || currentTabUrl;
+    } catch (urlError) {
+      elements.currentPage.textContent = currentTabUrl || 'Unknown page';
+    }
+
     // Use chrome.scripting.executeScript directly (Manifest V3)
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },

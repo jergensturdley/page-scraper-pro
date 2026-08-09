@@ -70,6 +70,13 @@ describe('Popup URL helper regressions', () => {
     });
   });
 
+  test('rejects lookalike video provider hosts', () => {
+    const { getVideoProviderId } = loadPopupHelpers();
+
+    expect(getVideoProviderId('https://notyoutube.com/embed/abc123')).toBeNull();
+    expect(getVideoProviderId('https://notvimeo.com/video/42')).toBeNull();
+  });
+
   test('preserves the complete scraped page URL in exported data', () => {
     const { buildExportData } = loadPopupHelpers();
     const data = { images: [], videos: [], audios: [], links: [], text: '' };
@@ -81,6 +88,19 @@ describe('Popup URL helper regressions', () => {
     const popupJs = fs.readFileSync(popupJsPath, 'utf8');
 
     expect(popupJs).toContain('const videoProvider = getVideoProviderId(embedUrl);');
+  });
+
+  test('refreshes the current URL before re-scraping the active tab', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const scrapeFunction = popupJs.slice(
+      popupJs.indexOf('async function scrapePageData()'),
+      popupJs.indexOf('// Update UI with scraped data')
+    );
+
+    expect(scrapeFunction).toContain("currentTabUrl = tab.url || '';");
+    expect(scrapeFunction).toContain('elements.currentPage.textContent = url.hostname || currentTabUrl;');
+    expect(scrapeFunction.indexOf("currentTabUrl = tab.url || '';"))
+      .toBeLessThan(scrapeFunction.indexOf('chrome.scripting.executeScript'));
   });
 });
 
