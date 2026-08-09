@@ -3,11 +3,23 @@
  */
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const stylesPath = path.join(__dirname, '..', 'styles.css');
 const popupJsPath = path.join(__dirname, '..', 'popup.js');
 const backgroundJsPath = path.join(__dirname, '..', 'background.js');
 const manifestPath = path.join(__dirname, '..', 'manifest.json');
+
+function loadPopupHelpers() {
+  const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+  const domElementsIndex = popupJs.indexOf('// DOM Elements');
+  const helperSource = domElementsIndex === -1 ? popupJs : popupJs.slice(0, domElementsIndex);
+  const context = { URL };
+
+  vm.runInNewContext(`${helperSource}
+this.popupHelpers = { getVideoProviderId, buildExportData };`, context);
+  return context.popupHelpers;
+}
 
 function getRule(css, selector) {
   const blocks = css.split('}');
@@ -40,6 +52,31 @@ function declarations(rule) {
       .filter(([k]) => k !== null)
   );
 }
+
+describe('Popup URL helper regressions', () => {
+  test('identifies a YouTube embed video ID', () => {
+    const { getVideoProviderId } = loadPopupHelpers();
+    expect(getVideoProviderId('https://www.youtube.com/embed/abc123')).toEqual({
+      provider: 'youtube',
+      id: 'abc123'
+    });
+  });
+
+  test('identifies a Vimeo player video ID', () => {
+    const { getVideoProviderId } = loadPopupHelpers();
+    expect(getVideoProviderId('https://player.vimeo.com/video/42')).toEqual({
+      provider: 'vimeo',
+      id: '42'
+    });
+  });
+
+  test('preserves the complete scraped page URL in exported data', () => {
+    const { buildExportData } = loadPopupHelpers();
+    const data = { images: [], videos: [], audios: [], links: [], text: '' };
+
+    expect(buildExportData('https://example.com/a?x=1', data).url).toBe('https://example.com/a?x=1');
+  });
+});
 
 describe('Popup UI Bug Fixes', () => {
 

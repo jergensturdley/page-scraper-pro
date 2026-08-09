@@ -23,6 +23,35 @@ let scrapedData = {
   text: ''
 };
 
+let currentTabUrl = '';
+
+function getVideoProviderId(url) {
+  try {
+    const parsedUrl = new URL(url);
+    const pathParts = parsedUrl.pathname.split('/').filter(Boolean);
+
+    if (parsedUrl.hostname.endsWith('youtube.com') && pathParts[0] === 'embed' && pathParts[1]) {
+      return { provider: 'youtube', id: pathParts[1] };
+    }
+
+    if (parsedUrl.hostname.endsWith('vimeo.com') && pathParts[0] === 'video' && pathParts[1]) {
+      return { provider: 'vimeo', id: pathParts[1] };
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
+}
+
+function buildExportData(url, data) {
+  return {
+    url,
+    timestamp: new Date().toISOString(),
+    ...data
+  };
+}
+
 // Function that can be injected via scripting API
 function scrapePageFromContent() {
   const images = [];
@@ -193,11 +222,13 @@ async function getCurrentTab() {
       return;
     }
 
+    currentTabUrl = tab.url || '';
+
     try {
-      const url = new URL(tab.url);
-      elements.currentPage.textContent = url.hostname || tab.url;
+      const url = new URL(currentTabUrl);
+      elements.currentPage.textContent = url.hostname || currentTabUrl;
     } catch (urlError) {
-      elements.currentPage.textContent = tab.url || 'Unknown page';
+      elements.currentPage.textContent = currentTabUrl || 'Unknown page';
     }
   } catch (error) {
     console.error('Failed to get current tab:', error);
@@ -909,11 +940,7 @@ async function copyTabData(type) {
 
 // Export as JSON
 async function exportJson() {
-  const data = {
-    url: elements.currentPage.textContent,
-    timestamp: new Date().toISOString(),
-    ...scrapedData
-  };
+  const data = buildExportData(currentTabUrl, scrapedData);
   
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
