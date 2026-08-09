@@ -180,6 +180,43 @@ describe('Popup UI Bug Fixes', () => {
 });
 
 
+
+describe('Rendered video security and controls', () => {
+  function renderVideosSource() {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function renderVideos()');
+    const end = popupJs.indexOf('// Render audios', start);
+    return popupJs.slice(start, end);
+  }
+
+  test('builds video result markup without unsafe HTML interpolation', () => {
+    const source = renderVideosSource();
+
+    expect(source).not.toMatch(/\.innerHTML\s*=/);
+    expect(source).not.toContain('item.innerHTML');
+  });
+
+  test('labels native video open and copy controls', () => {
+    const source = renderVideosSource();
+
+    expect(source).toContain("document.createElement('a')");
+    expect(source).toContain("openLink.textContent = 'Open video'");
+    expect(source).toContain("openLink.target = '_blank'");
+    expect(source).toContain("openLink.rel = 'noopener'");
+    expect(source).toContain("copyBtn.setAttribute('aria-label', 'Copy video URL')");
+  });
+
+  test('provides an Open video link for every rendered video by default', () => {
+    const source = renderVideosSource();
+    const openLinkIndex = source.indexOf("openLink.textContent = 'Open video'");
+    const previewBranchIndex = source.indexOf("if (video.type === 'embed')");
+
+    expect(openLinkIndex).toBeGreaterThan(-1);
+    expect(previewBranchIndex).toBeGreaterThan(-1);
+    expect(openLinkIndex).toBeLessThan(previewBranchIndex);
+  });
+});
+
 describe('Scraper settings injection', () => {
   function loadFallbackScraper(document) {
     const popupJs = fs.readFileSync(popupJsPath, 'utf8');

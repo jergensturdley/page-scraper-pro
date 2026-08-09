@@ -697,26 +697,63 @@ function renderLinks() {
 // Render videos
 function renderVideos() {
   elements.videosCount.textContent = `${scrapedData.videos.length} videos found`;
-  
+
   if (scrapedData.videos.length === 0) {
-    elements.videosContainer.innerHTML = `
-      <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
-          <polygon points="23 7 16 12 23 17 23 7"/>
-          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-        </svg>
-        <p>No videos found</p>
-      </div>
-    `;
+    const emptyState = document.createElement('div');
+    emptyState.className = 'empty-state';
+    const message = document.createElement('p');
+    message.textContent = 'No videos found';
+    emptyState.appendChild(message);
+    elements.videosContainer.replaceChildren(emptyState);
     return;
   }
-  
+
   const grid = document.createElement('div');
   grid.className = 'video-grid';
-  
-  scrapedData.videos.forEach((video, index) => {
+
+  scrapedData.videos.forEach((video) => {
     const item = document.createElement('div');
     item.className = 'video-item';
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'video-wrapper';
+    const overlay = document.createElement('div');
+    overlay.className = 'video-overlay';
+    const type = document.createElement('span');
+    type.className = 'video-type';
+    type.textContent = video.type || 'video';
+    overlay.appendChild(type);
+
+    if (video.width > 0 && video.height > 0) {
+      const size = document.createElement('span');
+      size.className = 'video-size';
+      size.textContent = `${video.width}×${video.height}`;
+      overlay.appendChild(size);
+    }
+
+    const info = document.createElement('div');
+    info.className = 'video-info';
+    const url = document.createElement('span');
+    url.className = 'video-url';
+    url.title = video.src;
+    url.textContent = video.src.length > 40 ? `${video.src.substring(0, 40)}...` : video.src;
+
+    const openLink = document.createElement('a');
+    openLink.className = 'open-video-link';
+    openLink.href = video.src;
+    openLink.target = '_blank';
+    openLink.rel = 'noopener';
+    openLink.textContent = 'Open video';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-video-btn';
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy video URL');
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(video.src);
+      showToast('Video URL copied!');
+    });
 
     let videoPreviewEl = null;
     if (video.type === 'embed') {
@@ -733,8 +770,6 @@ function renderVideos() {
           videoPreviewEl = document.createElement('img');
           videoPreviewEl.src = `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
           videoPreviewEl.alt = 'Video thumbnail';
-          videoPreviewEl.style.cursor = 'pointer';
-          videoPreviewEl.addEventListener('click', () => window.open(embedUrl, '_blank'));
         }
       } else if (isVimeo) {
         const videoId = videoProvider?.provider === 'vimeo'
@@ -744,61 +779,36 @@ function renderVideos() {
           videoPreviewEl = document.createElement('img');
           videoPreviewEl.src = `https://vumbnail.com/${videoId}.jpg`;
           videoPreviewEl.alt = 'Video thumbnail';
-          videoPreviewEl.style.cursor = 'pointer';
-          videoPreviewEl.addEventListener('click', () => window.open(embedUrl, '_blank'));
         }
       } else if (video.poster) {
         videoPreviewEl = document.createElement('img');
         videoPreviewEl.src = video.poster;
         videoPreviewEl.alt = 'Video thumbnail';
-        videoPreviewEl.style.cursor = 'pointer';
-        videoPreviewEl.addEventListener('click', () => window.open(embedUrl, '_blank'));
       }
     } else {
       videoPreviewEl = document.createElement('video');
       videoPreviewEl.src = video.src;
       videoPreviewEl.poster = video.poster || '';
       videoPreviewEl.preload = 'metadata';
-      videoPreviewEl.style.cursor = 'pointer';
-      videoPreviewEl.addEventListener('click', () => window.open(video.src, '_blank'));
     }
-
-    const sizeInfo = video.width > 0 && video.height > 0 ? `<span class="video-size">${video.width}×${video.height}</span>` : '';
-    const truncatedUrl = video.src.length > 40 ? video.src.substring(0, 40) + '...' : video.src;
-
-    item.innerHTML = `
-      <div class="video-wrapper">
-        <div class="video-overlay">
-          <span class="video-type">${video.type}</span>
-          ${sizeInfo}
-        </div>
-      </div>
-      <div class="video-info">
-        <span class="video-url" title="${video.src}">${truncatedUrl}</span>
-        <button class="copy-video-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-          </svg>
-        </button>
-      </div>
-    `;
 
     if (videoPreviewEl) {
-      item.querySelector('.video-wrapper').insertBefore(videoPreviewEl, item.querySelector('.video-overlay'));
+      const previewLink = document.createElement('a');
+      previewLink.className = 'video-preview-link';
+      previewLink.href = video.src;
+      previewLink.target = '_blank';
+      previewLink.rel = 'noopener';
+      previewLink.setAttribute('aria-label', 'Open video preview');
+      previewLink.appendChild(videoPreviewEl);
+      wrapper.appendChild(previewLink);
     }
-
-    const copyBtn = item.querySelector('.copy-video-btn');
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(video.src);
-      showToast('Video URL copied!');
-    });
-
+    wrapper.appendChild(overlay);
+    info.append(url, openLink, copyBtn);
+    item.append(wrapper, info);
     grid.appendChild(item);
   });
-  
-  elements.videosContainer.innerHTML = '';
-  elements.videosContainer.appendChild(grid);
+
+  elements.videosContainer.replaceChildren(grid);
 }
 
 // Render audios
