@@ -76,6 +76,12 @@ describe('Popup URL helper regressions', () => {
 
     expect(buildExportData('https://example.com/a?x=1', data).url).toBe('https://example.com/a?x=1');
   });
+
+  test('uses the video URL helper when rendering embed previews', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+
+    expect(popupJs).toContain('const videoProvider = getVideoProviderId(embedUrl);');
+  });
 });
 
 describe('Popup UI Bug Fixes', () => {

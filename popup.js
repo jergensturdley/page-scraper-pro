@@ -685,23 +685,28 @@ function renderVideos() {
     let videoPreviewEl = null;
     if (video.type === 'embed') {
       const embedUrl = video.src;
-      const isYouTube = embedUrl.includes('youtube');
-      const isVimeo = embedUrl.includes('vimeo');
+      const videoProvider = getVideoProviderId(embedUrl);
+      const isYouTube = videoProvider?.provider === 'youtube' || embedUrl.includes('youtube');
+      const isVimeo = videoProvider?.provider === 'vimeo' || embedUrl.includes('vimeo');
 
       if (isYouTube) {
-        const videoId = embedUrl.match(/[?&]v=([^&#]*)/) || embedUrl.match(/youtu\.be\/([^?&#]*)/);
+        const videoId = videoProvider?.provider === 'youtube'
+          ? videoProvider.id
+          : (embedUrl.match(/[?&]v=([^&#]*)/) || embedUrl.match(/youtu\.be\/([^?&#]*)/))?.[1];
         if (videoId) {
           videoPreviewEl = document.createElement('img');
-          videoPreviewEl.src = `https://img.youtube.com/vi/${videoId[1]}/mqdefault.jpg`;
+          videoPreviewEl.src = `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
           videoPreviewEl.alt = 'Video thumbnail';
           videoPreviewEl.style.cursor = 'pointer';
           videoPreviewEl.addEventListener('click', () => window.open(embedUrl, '_blank'));
         }
       } else if (isVimeo) {
-        const videoId = embedUrl.match(/vimeo\.com\/(\d+)/);
+        const videoId = videoProvider?.provider === 'vimeo'
+          ? videoProvider.id
+          : embedUrl.match(/vimeo\.com\/(\d+)/)?.[1];
         if (videoId) {
           videoPreviewEl = document.createElement('img');
-          videoPreviewEl.src = `https://vumbnail.com/${videoId[1]}.jpg`;
+          videoPreviewEl.src = `https://vumbnail.com/${videoId}.jpg`;
           videoPreviewEl.alt = 'Video thumbnail';
           videoPreviewEl.style.cursor = 'pointer';
           videoPreviewEl.addEventListener('click', () => window.open(embedUrl, '_blank'));
