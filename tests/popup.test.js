@@ -1044,38 +1044,119 @@ describe('Confirmed popup clipboard and ZIP actions', () => {
     expect(reportError).toHaveBeenCalled();
   });
 
-  test('background ZIP creation returns explicit fallback and finalization failure results', async () => {
+  function loadBackgroundZipHelpers(extraContext = {}) {
     const source = fs.readFileSync(backgroundJsPath, 'utf8');
-    const start = source.indexOf('async function createZipFromUrls');
-    const end = source.indexOf('// Create ZIP from file objects', start);
-    const context = {};
-    vm.runInNewContext(`${source.slice(start, end)}
-this.createZipFromUrls = createZipFromUrls;`, context);
+    const start = source.indexOf('function getZipExtension');
+    const context = { Blob, Uint8Array, URL, btoa, console, ...extraContext };
+    vm.runInNewContext(`${source.slice(start)}
+this.zipHelpers = { sanitizeZipEntryName, createZipFromUrls };`, context);
+    return context.zipHelpers;
+  }
+
+  test('zero successful ZIP entries trigger one bounded individual-download fallback', async () => {
+    const { createZipFromUrls } = loadBackgroundZipHelpers();
+    const downloadIndividually = jest.fn().mockResolvedValue([]);
     const notify = jest.fn();
-    const reportError = jest.fn();
 
-    await expect(context.createZipFromUrls(['https://example.com/a.png'], ['A'], {
-      ensureLibrary: async () => false,
-      notify,
-      reportError
-    })).resolves.toEqual({ success: false, fallback: true });
+    const result = await createZipFromUrls(
+      ['https://example.com/a.png', 'https://example.com/b.png'],
+      ['A', 'B'],
+      {
+        ensureLibrary: async () => true,
+        notify,
+        reportError: jest.fn(),
+        fetchUrl: jest.fn().mockResolvedValue({ ok: false, status: 403 }),
+        createZip: () => ({}),
+        createFile: jest.fn(),
+        downloadZip: jest.fn(),
+        downloadIndividually
+      }
+    );
 
-    await expect(context.createZipFromUrls([], [], {
-      ensureLibrary: async () => true,
-      notify,
-      reportError,
-      createZip: () => ({ end: () => { throw new Error('finalize failed'); } }),
-      fetchUrl: jest.fn(),
-      createFile: jest.fn(),
-      downloadZip: jest.fn()
-    })).resolves.toEqual({ success: false, error: 'finalize failed' });
+    expect(result).toEqual({ success: false, fallback: true, added: 0, skipped: 2 });
+    expect(downloadIndividually).toHaveBeenCalledTimes(1);
+    expect(downloadIndividually.mock.calls[0][0]).toHaveLength(2);
+    expect(notify).toHaveBeenCalledWith('No images could be added to the ZIP. Downloading 2 files individually.');
   });
 
-  test('popup has no handwritten ZIP builder or duplicate ZIP export path', () => {
-    const source = fs.readFileSync(popupJsPath, 'utf8');
-    expect(source).not.toContain('function buildZip(');
-    expect(source).not.toContain('function fetchImageAsBytes(');
-    expect(source).not.toContain('function exportAsZip(');
+  test('ZIP entry names are safe, extension-bearing, and unique', async () => {
+    const { createZipFromUrls } = loadBackgroundZipHelpers();
+    const filenames = [];
+    const zip = { add: jest.fn(), end: jest.fn() };
+
+    const resultPromise = createZipFromUrls(
+      [
+        'https://example.com/a.png',
+        'https://example.com/b.png',
+        'https://example.com/c.webp',
+        'https://example.com/d.png',
+        'https://example.com/e.png'
+      ],
+      ['  ../.\u0000/evil', '  ../.\u0000/evil', '...', '', ''],
+      {
+        ensureLibrary: async () => true,
+        notify: jest.fn(),
+        reportError: jest.fn(),
+        fetchUrl: async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer }),
+        createZip: () => zip,
+        createFile: filename => {
+          filenames.push(filename);
+          return { push: jest.fn() };
+        },
+        downloadZip: jest.fn(),
+        downloadIndividually: jest.fn()
+      }
+    );
+    zip.end.mockImplementation(() => zip.ondata(null, new Uint8Array([1]), true));
+    const result = await resultPromise;
+
+    expect(filenames).toHaveLength(5);
+    expect(new Set(filenames).size).toBe(5);
+    filenames.forEach(filename => {
+      expect(filename).not.toMatch(/[\/\\\x00-\x1f\x7f]/);
+      expect(filename).not.toMatch(/^\./);
+      expect(filename).toMatch(/\.(png|webp)$/);
+    });
+    expect(filenames).toEqual(expect.arrayContaining(['image-3.webp', 'image-4.png', 'image-5.png']));
+    expect(result).toEqual({ success: true, added: 5, skipped: 0 });
+  });
+
+  test('partial ZIP success reports exact added and skipped counts', async () => {
+    const { createZipFromUrls } = loadBackgroundZipHelpers();
+    const notify = jest.fn();
+    const zip = { add: jest.fn(), end: jest.fn() };
+    let fetchCount = 0;
+    zip.end.mockImplementation(() => zip.ondata(null, new Uint8Array([1]), true));
+
+    const result = await createZipFromUrls(['https://example.com/a.png', 'https://example.com/b.png'], ['A', 'B'], {
+      ensureLibrary: async () => true,
+      notify,
+      reportError: jest.fn(),
+      fetchUrl: async () => (++fetchCount === 1
+        ? { ok: true, arrayBuffer: async () => new Uint8Array([7]).buffer }
+        : { ok: false, status: 404 }),
+      createZip: () => zip,
+      createFile: () => ({ push: jest.fn() }),
+      downloadZip: jest.fn(),
+      downloadIndividually: jest.fn()
+    });
+
+    expect(result).toEqual({ success: true, added: 1, skipped: 1 });
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('1 image added; 1 skipped'));
+  });
+
+  test('popup and background contain no handwritten or legacy ZIP paths', () => {
+    const popupSource = fs.readFileSync(popupJsPath, 'utf8');
+    const backgroundSource = fs.readFileSync(backgroundJsPath, 'utf8');
+    for (const source of [popupSource, backgroundSource]) {
+      ['createZipArchive', 'calculateCRC32', 'createAndDownloadZip', 'createZipArchiveFromFiles'].forEach(name => {
+        expect(source).not.toContain(name);
+      });
+    }
+    expect(backgroundSource).not.toContain("request.action === 'createAndDownloadZip'");
+    expect(popupSource).not.toContain('function buildZip(');
+    expect(popupSource).not.toContain('function fetchImageAsBytes(');
+    expect(popupSource).not.toContain('function exportAsZip(');
   });
 
   test('background ZIP messages keep the response channel open and send the async result', () => {
@@ -1425,14 +1506,17 @@ describe('Responsive dark Operate interface contracts', () => {
 
 
 describe('Accessible result feedback and export actions', () => {
-  test('announces concise image, link, and selection changes without live result grids', () => {
+  test('announces concise image, link, and persistent selection changes without live result grids', () => {
     const popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
 
-    ['imagesCount', 'linksCount', 'selectionInfo'].forEach((id) => {
+    ['imagesCount', 'linksCount', 'selectionStatus'].forEach((id) => {
       expect(popupHtml).toMatch(new RegExp(
         `<[^>]+id=["']${id}["'][^>]+role=["']status["'][^>]+aria-live=["']polite["'][^>]+aria-atomic=["']true["']`
       ));
     });
+    const selectionInfo = popupHtml.match(/<[^>]+id=["']selectionInfo["'][^>]*>/)[0];
+    expect(selectionInfo).not.toMatch(/role=["']status["']|aria-live=/);
+    expect(popupHtml.indexOf('id="selectionStatus"')).toBeLessThan(popupHtml.indexOf('id="selectionToolbar"'));
     ['imagesContainer', 'linksContainer'].forEach((id) => {
       const element = popupHtml.match(new RegExp(`<[^>]+id=["']${id}["'][^>]*>`));
       expect(element).not.toBeNull();
@@ -1445,6 +1529,90 @@ describe('Accessible result feedback and export actions', () => {
 
     expect(popupJs).toContain("getEmptyResultsMessage('images', images.length, scrapedData.images.length) ||");
     expect(popupJs).toContain("getEmptyResultsMessage('links', links.length, scrapedData.links.length) ||");
+  });
+
+  test('selection updates announce counts, clearing, and move focus before hiding the toolbar', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function focusStableImagesControl');
+    const end = popupJs.indexOf('// Select all visible images', start);
+    const focus = jest.fn();
+    const imageFilter = { focus };
+    const status = { textContent: '' };
+    const info = { textContent: '' };
+    const toolbar = {
+      classList: { add: jest.fn(), remove: jest.fn() },
+      contains: element => element === activeElement
+    };
+    let activeElement = {};
+    const document = {
+      activeElement,
+      getElementById: id => ({ selectionToolbar: toolbar, selectionInfo: info, selectionStatus: status, imageFilter }[id] || null)
+    };
+    const context = { document };
+    vm.runInNewContext(`${popupJs.slice(start, end)}
+this.setSelection = value => { selectedImages = new Set(value); };
+this.updateSelectionToolbar = updateSelectionToolbar;`, context);
+
+    context.setSelection(['a', 'b']);
+    context.updateSelectionToolbar();
+    expect(status.textContent).toBe('2 selected');
+    expect(info.textContent).toBe('2 selected');
+
+    activeElement = {};
+    document.activeElement = activeElement;
+    context.setSelection([]);
+    context.updateSelectionToolbar();
+    expect(status.textContent).toBe('Selection cleared');
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(toolbar.classList.remove).toHaveBeenCalledWith('visible');
+  });
+
+  test('removing the focused last download item moves focus to a stable dialog control', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function focusStableDownloadControl');
+    const end = popupJs.indexOf('// Render download panel list', start);
+    const focus = jest.fn();
+    const removeButton = {};
+    const document = {
+      activeElement: removeButton,
+      getElementById: id => id === 'downloadConfirmBtn' ? { focus } : null
+    };
+    const context = { document };
+    vm.runInNewContext(`${popupJs.slice(start, end)}
+this.focusStableDownloadControl = focusStableDownloadControl;`, context);
+
+    context.focusStableDownloadControl(removeButton, 0);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  test('copy image URLs uses the normalized copied count and skips unsafe-only input', async () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const normalizeStart = popupJs.indexOf('const MAX_IMAGE_DATA_URL_LENGTH');
+    const normalizeEnd = popupJs.indexOf('function safeDimension', normalizeStart);
+    const copyStart = popupJs.indexOf('async function copyImageURLs');
+    const copyEnd = popupJs.indexOf('// Export images with option', copyStart);
+    const context = { URL };
+    vm.runInNewContext(`${popupJs.slice(normalizeStart, normalizeEnd)}
+${popupJs.slice(copyStart, copyEnd)}
+this.copyImageURLs = copyImageURLs;`, context);
+    const copy = jest.fn().mockResolvedValue(true);
+    const notify = jest.fn();
+
+    await context.copyImageURLs([
+      { src: 'https://example.com/a.png' },
+      { src: 'javascript:alert(1)' },
+      { src: 'https://example.com/b.png' }
+    ], { copy, notify });
+    expect(copy).toHaveBeenCalledWith(
+      'https://example.com/a.png\nhttps://example.com/b.png',
+      '2 image URLs copied!',
+      'Failed to copy image URLs'
+    );
+
+    copy.mockClear();
+    await context.copyImageURLs([{ src: 'javascript:alert(1)' }], { copy, notify });
+    expect(copy).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith('No safe image URLs to copy');
   });
 
   test('gives every compact footer export control an action-oriented accessible name', () => {
@@ -1524,10 +1692,10 @@ describe('Least-privilege extension packaging', () => {
     expect(fs.existsSync(path.join(__dirname, '..', 'content.css'))).toBe(false);
   });
 
-  test('vendored fflate executes and exposes the streaming ZIP APIs background uses', () => {
+  test('vendored fflate creates a readable archive through createZipFromUrls', async () => {
     const source = fs.readFileSync(fflatePath, 'utf8');
     const module = { exports: {} };
-    const context = {
+    const libraryContext = {
       module,
       exports: module.exports,
       require,
@@ -1537,11 +1705,39 @@ describe('Least-privilege extension packaging', () => {
       setTimeout,
       clearTimeout
     };
-
-    vm.runInNewContext(source, context, { filename: 'libs/fflate.umd.js' });
-
+    vm.runInNewContext(source, libraryContext, { filename: 'libs/fflate.umd.js' });
     expect(typeof module.exports.Zip).toBe('function');
-    expect(typeof module.exports.AsyncZipDeflate).toBe('function');
+    expect(typeof module.exports.ZipDeflate).toBe('function');
+
+    const backgroundSource = fs.readFileSync(backgroundJsPath, 'utf8');
+    const start = backgroundSource.indexOf('function getZipExtension');
+    const backgroundContext = { Blob, Uint8Array, URL, btoa, console };
+    vm.runInNewContext(`${backgroundSource.slice(start)}
+this.createZipFromUrls = createZipFromUrls;`, backgroundContext);
+    let archiveBytes;
+    const expected = new TextEncoder().encode('real vendored fflate data');
+
+    const result = await backgroundContext.createZipFromUrls(
+      ['https://example.com/photo.png'],
+      ['photo'],
+      {
+        ensureLibrary: async () => true,
+        notify: jest.fn(),
+        reportError: jest.fn(),
+        fetchUrl: async () => ({ ok: true, arrayBuffer: async () => expected.buffer }),
+        createZip: () => new module.exports.Zip(),
+        createFile: filename => new module.exports.ZipDeflate(filename, { level: 0 }),
+        downloadZip: async dataUrl => {
+          archiveBytes = Uint8Array.from(Buffer.from(dataUrl.split(',')[1], 'base64'));
+        },
+        downloadIndividually: jest.fn()
+      }
+    );
+
+    expect(result).toEqual({ success: true, added: 1, skipped: 0 });
+    const files = module.exports.unzipSync(archiveBytes);
+    expect(Object.keys(files)).toEqual(['photo.png']);
+    expect(Buffer.from(files['photo.png']).toString()).toBe('real vendored fflate data');
   });
 
   test('records the pinned fflate source and upstream MIT attribution', () => {
@@ -1592,6 +1788,8 @@ describe('Least-privilege extension packaging', () => {
     const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
 
     expect(backgroundJs).toContain("importScripts(chrome.runtime.getURL('libs/fflate.umd.js'))");
+    expect(backgroundJs).toContain("typeof fflate.ZipDeflate === 'function'");
+    expect(backgroundJs).not.toContain('AsyncZipDeflate');
     expect(backgroundJs).not.toMatch(/importScripts\(\s*['"]https?:\/\//);
     expect(backgroundJs).not.toContain('cdn.jsdelivr.net');
     expect(backgroundJs).toContain('Packaged ZIP support is unavailable');

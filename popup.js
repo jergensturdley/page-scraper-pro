@@ -141,7 +141,7 @@ async function requestZipExport(images, deps = {
 }) {
   const entries = images.map(image => ({
     url: normalizeHttpUrl(image?.src),
-    name: typeof image?.alt === 'string' && image.alt.trim() ? image.alt.trim().replace(/[^a-z0-9._-]/gi, '_').substring(0, 100) || 'image' : 'image'
+    name: typeof image?.alt === 'string' ? image.alt.trim().substring(0, 100) : ''
   })).filter(entry => entry.url);
 
   if (entries.length === 0) {
@@ -913,7 +913,7 @@ function setupEventListeners() {
   elements.exportVideos.addEventListener('click', exportVideos);
   elements.exportAudios.addEventListener('click', exportAudios);
   elements.exportArchive.addEventListener('click', exportArchive);
-  elements.copyImageUrls.addEventListener('click', copyImageURLs);
+  elements.copyImageUrls.addEventListener('click', () => copyImageURLs());
   elements.settingsBtn.addEventListener('click', openSettings);
   if (elements.settingsForm) elements.settingsForm.addEventListener('submit', saveSettings);
   if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', () => settingsDialogController.close());
@@ -2040,20 +2040,20 @@ async function exportArchive() {
 }
 
 // Copy all image URLs to clipboard
-async function copyImageURLs() {
-  if (scrapedData.images.length === 0) {
-    showToast('No images to copy');
-    return;
+async function copyImageURLs(images = scrapedData.images, deps = {
+  copy: copyTextWithFeedback,
+  notify: showToast
+}) {
+  const safeUrls = (Array.isArray(images) ? images : [])
+    .map(img => normalizeImageUrl(img?.src))
+    .filter(Boolean);
+  if (safeUrls.length === 0) {
+    deps.notify('No safe image URLs to copy');
+    return false;
   }
-  
-  const urls = scrapedData.images.map(img => normalizeImageUrl(img.src)).filter(Boolean).join('\n');
-  if (!urls) {
-    showToast('No valid image URLs to copy');
-    return;
-  }
-  await copyTextWithFeedback(
-    urls,
-    `${scrapedData.images.length} image URLs copied!`,
+  return deps.copy(
+    safeUrls.join('\n'),
+    `${safeUrls.length} image URLs copied!`,
     'Failed to copy image URLs'
   );
 }
@@ -2135,16 +2135,27 @@ function toggleImageSelection(src, itemEl) {
   scheduleWorkspaceSave();
 }
 
-// Update selection toolbar visibility and count
+function focusStableImagesControl() {
+  const control = document.getElementById('imageFilter') || document.getElementById('imagesTabButton');
+  if (control) control.focus();
+}
+
+// Update persistent selection feedback before changing toolbar visibility.
 function updateSelectionToolbar() {
   const toolbar = document.getElementById('selectionToolbar');
   const info = document.getElementById('selectionInfo');
-  if (!toolbar || !info) return;
+  const status = document.getElementById('selectionStatus');
+  if (!toolbar || !info || !status) return;
 
   if (selectedImages.size > 0) {
+    const message = `${selectedImages.size} selected`;
+    info.textContent = message;
+    status.textContent = message;
     toolbar.classList.add('visible');
-    info.textContent = `${selectedImages.size} selected`;
   } else {
+    info.textContent = '0 selected';
+    status.textContent = 'Selection cleared';
+    if (toolbar.contains(document.activeElement)) focusStableImagesControl();
     toolbar.classList.remove('visible');
   }
 }
@@ -2196,6 +2207,12 @@ function closeDownloadPanel() {
   }
 }
 
+function focusStableDownloadControl(removeButton, remainingCount) {
+  if (remainingCount !== 0 || document.activeElement !== removeButton) return;
+  const control = document.getElementById('downloadConfirmBtn') || document.getElementById('closePanelBtn');
+  if (control) control.focus();
+}
+
 // Render download panel list
 function renderDownloadPanel() {
   const list = document.getElementById('downloadPanelList');
@@ -2245,6 +2262,7 @@ function renderDownloadPanel() {
         if (selectionButton) selectionButton.setAttribute('aria-pressed', 'false');
       }
       updateSelectionToolbar();
+      focusStableDownloadControl(removeBtn, selectedImages.size);
       renderDownloadPanel();
       scheduleWorkspaceSave();
     });

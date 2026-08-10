@@ -134,8 +134,9 @@
           <button class="tab-btn" data-tab="text" id="textTabButton" role="tab" aria-controls="textTab" aria-selected="false" tabindex="-1">Text</button>
         </div>
 
+        <div class="sr-only" id="selectionStatus" role="status" aria-live="polite" aria-atomic="true">Selection cleared</div>
         <div class="selection-toolbar" id="selectionToolbar">
-          <span class="selection-info" id="selectionInfo" role="status" aria-live="polite" aria-atomic="true">0 selected</span>
+          <span class="selection-info" id="selectionInfo">0 selected</span>
           <div class="selection-actions">
             <button class="select-all-btn" id="selectAllBtn">Select All</button>
             <button class="download-selected-btn" id="openPanelBtn">Download</button>

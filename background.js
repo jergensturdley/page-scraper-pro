@@ -243,11 +243,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
   }
   
-  if (request.action === 'createAndDownloadZip') {
-    console.log('createAndDownloadZip received, images:', request.images.length);
-    createAndDownloadZip(request.images, request.zipName);
-  }
-  
   if (request.action === 'createZipFromUrls') {
     console.log('createZipFromUrls received, count:', request.count);
     createZipFromUrls(request.urls, request.names)
@@ -348,182 +343,47 @@ async function scrapePage(tabId) {
   return results[0].result;
 }
 
-// Create ZIP archive from images
-async function createZipArchive(images) {
-  console.log('Creating ZIP with', images.length, 'images');
-  
-  // Each file gets a local file header
-  const files = [];
-  
-  for (let i = 0; i < images.length; i++) {
-    const img = images[i];
-    console.log(`Processing ${i}/${images.length}: ${img.name}`);
-    
-    // Parse data URL
-    const matches = img.dataUrl.match(/^data:image\/([a-z]+);base64,(.+)$/i);
-    if (!matches) continue;
-    
-    const ext = matches[1];
-    const base64Data = matches[2];
-    const binaryData = atob(base64Data);
-    const fileData = new Uint8Array(binaryData.length);
-    for (let j = 0; j < binaryData.length; j++) {
-      fileData[j] = binaryData.charCodeAt(j);
-    }
-    
-    // CRC32
-    const crc = calculateCRC32(fileData);
-    
-    const nameBytes = new TextEncoder().encode(img.name);
-    const header = new Uint8Array(30 + nameBytes.length);
-    const view = new DataView(header.buffer);
-    
-    view.setUint32(0, 0x04034b50, true);
-    view.setUint16(4, 20, true);
-    view.setUint16(6, 0, true);
-    view.setUint16(8, 0, true);
-    view.setUint16(10, 0, true);
-    view.setUint16(12, 0, true);
-    view.setUint32(14, crc, true);
-    view.setUint32(18, fileData.length, true);
-    view.setUint32(22, fileData.length, true);
-    view.setUint16(26, nameBytes.length, true);
-    view.setUint16(28, 0, true);
-    header.set(nameBytes, 30);
-    
-    // Track offset for central directory
-    files.push({ header, data: fileData, nameBytes, crc, nameLen: nameBytes.length });
+function getZipExtension(rawName, url) {
+  const rawMatch = String(rawName || '').match(/\.([a-z0-9]+)$/i);
+  if (rawMatch && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(rawMatch[1].toLowerCase())) {
+    return `.${rawMatch[1].toLowerCase()}`;
   }
-  
-  console.log('Prepared', files.length, 'files for ZIP');
-  
-  // Calculate sizes
-  let localHeadersSize = 0;
-  for (const f of files) {
-    f.localOffset = localHeadersSize;
-    localHeadersSize += f.header.length + f.data.length;
-  }
-  
-  const centralDirSize = files.reduce((sum, f) => sum + 46 + f.nameLen, 0);
-  const totalSize = localHeadersSize + centralDirSize + 22; // + EOCD
-  
-  const result = new Uint8Array(totalSize);
-  
-  // Write local file entries
-  let offset = 0;
-  for (const f of files) {
-    result.set(f.header, offset);
-    result.set(f.data, offset + f.header.length);
-    offset += f.header.length + f.data.length;
-  }
-  
-  const cdStartOffset = offset;
-  
-  // Write central directory
-  for (const f of files) {
-    const cdHeader = new Uint8Array(46);
-    const cdView = new DataView(cdHeader.buffer);
-    
-    cdView.setUint32(0, 0x02014b50, true);
-    cdView.setUint16(4, 20, true);
-    cdView.setUint16(6, 20, true);
-    cdView.setUint16(8, 0, true);
-    cdView.setUint16(10, 0, true);
-    cdView.setUint16(12, 0, true);
-    cdView.setUint16(14, 0, true);
-    cdView.setUint32(16, f.crc, true);
-    cdView.setUint32(20, f.data.length, true);
-    cdView.setUint32(24, f.data.length, true);
-    cdView.setUint16(28, f.nameLen, true);
-    cdView.setUint16(30, 0, true);
-    cdView.setUint16(32, 0, true);
-    cdView.setUint16(34, 0, true);
-    cdView.setUint16(36, 0, true);
-    cdView.setUint32(38, 0, true);
-    cdView.setUint32(42, f.localOffset, true);
-    
-    result.set(cdHeader, offset);
-    result.set(f.nameBytes, offset + 46);
-    offset += 46 + f.nameLen;
-  }
-  
-  const cdSize = offset - cdStartOffset;
-  
-  // Write EOCD (End of Central Directory)
-  const eocd = new Uint8Array(22);
-  const eocdView = new DataView(eocd.buffer);
-  eocdView.setUint32(0, 0x06054b50, true);
-  eocdView.setUint16(4, 0, true);
-  eocdView.setUint16(6, 0, true);
-  eocdView.setUint16(8, files.length, true);
-  eocdView.setUint16(10, files.length, true);
-  eocdView.setUint32(12, cdSize, true);
-  eocdView.setUint32(16, cdStartOffset, true);
-  eocdView.setUint16(20, 0, true);
-  
-  result.set(eocd, offset);
-  
-  console.log('ZIP created, size:', result.length, 'files:', files.length);
-  return new Blob([result], { type: 'application/zip' });
-}
-
-// Simple CRC32 calculation
-function calculateCRC32(data) {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[i] = c;
-  }
-  
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < data.length; i++) {
-    crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
-// Create ZIP and download it
-async function createAndDownloadZip(images, zipName) {
   try {
-    const zipBlob = await createZipArchive(images);
-    console.log('ZIP created, size:', zipBlob.size);
-    
-    // Convert to data URL for reliable download
-    const arrayBuffer = await zipBlob.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const urlMatch = new URL(url).pathname.match(/\.([a-z0-9]+)$/i);
+    if (urlMatch && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(urlMatch[1].toLowerCase())) {
+      return `.${urlMatch[1].toLowerCase()}`;
     }
-    const dataUrl = 'data:application/zip;base64,' + btoa(binary);
-    
-    // Download via background script
-    chrome.downloads.download({
-      url: dataUrl,
-      filename: zipName || 'scraped-images.zip',
-      saveAs: false
-    }, (id) => {
-      if (chrome.runtime.lastError) {
-        console.error('Download failed:', chrome.runtime.lastError);
-        showNotification('Download failed: ' + chrome.runtime.lastError.message);
-      } else {
-        showNotification(`Downloaded ${images.length} images to ${zipName}`);
-      }
-    });
-  } catch (error) {
-    console.error('ZIP creation failed:', error);
-    showNotification('Error creating ZIP: ' + error.message);
+  } catch {}
+  return '.jpg';
+}
+
+function sanitizeZipEntryName(rawName, url, index, usedNames) {
+  const extension = getZipExtension(rawName, url);
+  const raw = String(rawName || '').replace(/\.[a-z0-9]+$/i, '');
+  let base = raw
+    .replace(/[\x00-\x1f\x7f/\\]/g, '_')
+    .replace(/[^a-z0-9._ -]/gi, '_')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/[ .]+$/g, '')
+    .slice(0, 140);
+  if (!base || /^_+$/.test(base)) base = `image-${index + 1}`;
+
+  let filename = `${base}${extension}`;
+  let suffix = 2;
+  while (usedNames.has(filename.toLowerCase())) {
+    filename = `${base}-${suffix}${extension}`;
+    suffix++;
   }
+  usedNames.add(filename.toLowerCase());
+  return filename;
 }
 
 async function ensurePackagedZipLibrary(urls, names, dependencies) {
   const deps = dependencies || {
     hasLibrary: () => typeof fflate !== 'undefined'
       && typeof fflate.Zip === 'function'
-      && typeof fflate.AsyncZipDeflate === 'function',
+      && typeof fflate.ZipDeflate === 'function',
     loadLibrary: () => importScripts(chrome.runtime.getURL('libs/fflate.umd.js')),
     downloadIndividually: (items) => downloadFiles(items),
     notify: (message) => showNotification(message),
@@ -534,7 +394,7 @@ async function ensurePackagedZipLibrary(urls, names, dependencies) {
   try {
     deps.loadLibrary();
     if (!deps.hasLibrary()) {
-      throw new Error('Packaged fflate does not expose the required streaming ZIP APIs');
+      throw new Error('Packaged fflate does not expose Zip and synchronous ZipDeflate');
     }
     console.log('fflate loaded from extension libs');
     return true;
@@ -542,7 +402,7 @@ async function ensurePackagedZipLibrary(urls, names, dependencies) {
     deps.reportError('Packaged ZIP support is unavailable; downloading files individually.', error);
     deps.notify('Packaged ZIP support is unavailable. Downloading files individually.');
     const safeNames = Array.isArray(names) ? names : [];
-    await deps.downloadIndividually(urls.map((url, index) => ({
+    await deps.downloadIndividually(urls.slice(0, 200).map((url, index) => ({
       url,
       filename: safeNames[index] || `image-${index + 1}`,
       defaultExtension: '.jpg'
@@ -551,14 +411,15 @@ async function ensurePackagedZipLibrary(urls, names, dependencies) {
   }
 }
 
-// Create ZIP from URLs (fetch images and create ZIP) using packaged fflate streaming.
+// Create ZIP from URLs with packaged fflate's worker-free streaming APIs.
 async function createZipFromUrls(urls, names, deps = {
   ensureLibrary: ensurePackagedZipLibrary,
   notify: showNotification,
   reportError: console.error,
   fetchUrl: url => fetch(url, { mode: 'cors', credentials: 'omit' }),
   createZip: () => new fflate.Zip(),
-  createFile: filename => new fflate.AsyncZipDeflate(filename, { level: 0 }),
+  createFile: filename => new fflate.ZipDeflate(filename, { level: 0 }),
+  downloadIndividually: items => downloadFiles(items),
   downloadZip: (url, filename) => new Promise((resolve, reject) => {
     chrome.downloads.download({ url, filename, saveAs: false }, id => {
       const runtimeError = chrome.runtime.lastError;
@@ -567,18 +428,43 @@ async function createZipFromUrls(urls, names, deps = {
     });
   })
 }) {
-  const safeUrls = Array.isArray(urls) ? urls : [];
+  const suppliedUrls = Array.isArray(urls) ? urls : [];
   const safeNames = Array.isArray(names) ? names : [];
-  console.log('createZipFromUrls streaming:', safeUrls.length);
-  deps.notify(`Fetching ${safeUrls.length} images and streaming ZIP...`);
+  const candidates = suppliedUrls
+    .map((url, index) => ({ url, rawName: safeNames[index], index }))
+    .filter(item => typeof item.url === 'string'
+      && item.url
+      && !item.url.includes('preview_image.jpg')
+      && !item.url.includes('blank.gif'))
+    .slice(0, 200);
+  let added = 0;
+  let skipped = suppliedUrls.length - candidates.length;
+  let fallbackAttempted = false;
+  const fallbackToIndividualDownloads = async () => {
+    fallbackAttempted = true;
+    const fallbackNames = new Set();
+    const fallbackItems = candidates.map(item => ({
+      url: item.url,
+      filename: sanitizeZipEntryName(item.rawName, item.url, item.index, fallbackNames),
+      defaultExtension: '.jpg'
+    }));
+    deps.notify(`No images could be added to the ZIP. Downloading ${fallbackItems.length} files individually.`);
+    await deps.downloadIndividually(fallbackItems);
+    return { success: false, fallback: true, added, skipped };
+  };
+  deps.notify(`Fetching ${candidates.length} images and streaming ZIP...`);
 
   try {
-    if (!await deps.ensureLibrary(safeUrls, safeNames)) {
-      return { success: false, fallback: true };
+    if (!await deps.ensureLibrary(
+      candidates.map(item => item.url),
+      candidates.map(item => item.rawName)
+    )) {
+      return { success: false, fallback: true, added: 0, skipped: suppliedUrls.length };
     }
 
     const chunks = [];
     const zip = deps.createZip();
+    const usedNames = new Set();
     let resolveCompletion;
     const completion = new Promise(resolve => { resolveCompletion = resolve; });
     let completed = false;
@@ -593,10 +479,10 @@ async function createZipFromUrls(urls, names, deps = {
       if (error) {
         deps.reportError('fflate ZIP error:', error);
         deps.notify('Error creating ZIP');
-        finish({ success: false, error: error.message || 'ZIP stream failed' });
+        finish({ success: false, error: error.message || 'ZIP stream failed', added, skipped });
         return;
       }
-      chunks.push(chunk);
+      if (chunk) chunks.push(chunk);
       if (!final) return;
 
       (async () => {
@@ -608,143 +494,59 @@ async function createZipFromUrls(urls, names, deps = {
           const dataUrl = 'data:application/zip;base64,' + btoa(binary);
           const zipName = `scraped-images-${new Date().toISOString().slice(0, 10)}.zip`;
           await deps.downloadZip(dataUrl, zipName);
-          deps.notify('ZIP download started: ' + zipName);
-          finish({ success: true });
-        } catch (error) {
-          deps.reportError('ZIP download failed:', error);
-          deps.notify('ZIP download failed: ' + error.message);
-          finish({ success: false, error: error.message });
+          const summary = skipped > 0
+            ? `ZIP download started: ${zipName} (${added} image${added === 1 ? '' : 's'} added; ${skipped} skipped)`
+            : `ZIP download started: ${zipName}`;
+          deps.notify(summary);
+          finish({ success: true, added, skipped });
+        } catch (downloadError) {
+          deps.reportError('ZIP download failed:', downloadError);
+          deps.notify('ZIP download failed: ' + downloadError.message);
+          finish({ success: false, error: downloadError.message, added, skipped });
         }
       })();
     };
 
-    for (let i = 0; i < safeUrls.length; i++) {
-      const url = safeUrls[i];
-      const rawName = safeNames[i] || `image-${i + 1}`;
-      if (!url || url.includes('preview_image.jpg') || url.includes('blank.gif')) continue;
-
+    for (const item of candidates) {
       try {
-        const response = await deps.fetchUrl(url);
+        const response = await deps.fetchUrl(item.url);
         if (!response.ok) {
-          console.warn('Failed to fetch', url, response.status);
+          skipped++;
           continue;
         }
         const bytes = new Uint8Array(await response.arrayBuffer());
-        let ext = '.jpg';
-        const lower = url.toLowerCase();
-        if (lower.includes('.png')) ext = '.png';
-        else if (lower.includes('.gif')) ext = '.gif';
-        else if (lower.includes('.webp')) ext = '.webp';
-        else if (lower.includes('.svg')) ext = '.svg';
-
-        const filename = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(rawName) ? rawName : rawName + ext;
+        const filename = sanitizeZipEntryName(item.rawName, item.url, item.index, usedNames);
         const streamFile = deps.createFile(filename);
         zip.add(streamFile);
         streamFile.push(bytes, true);
+        added++;
       } catch (error) {
-        console.warn('Error fetching or adding to ZIP:', url, error);
+        skipped++;
+        deps.reportError('Error fetching or adding ZIP entry:', item.url, error);
       }
     }
+
+    if (added === 0) return await fallbackToIndividualDownloads();
 
     try {
       zip.end();
     } catch (error) {
       deps.reportError('Error finalizing ZIP:', error);
       deps.notify('Error creating ZIP');
-      finish({ success: false, error: error.message });
+      finish({ success: false, error: error.message, added, skipped });
     }
     return await completion;
   } catch (error) {
     deps.reportError('Error creating ZIP:', error);
+    if (added === 0 && !fallbackAttempted && typeof deps.downloadIndividually === 'function') {
+      skipped = suppliedUrls.length;
+      try {
+        return await fallbackToIndividualDownloads();
+      } catch (fallbackError) {
+        deps.reportError('Individual download fallback failed:', fallbackError);
+      }
+    }
     deps.notify('Error creating ZIP');
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, added, skipped };
   }
-}
-
-// Create ZIP from file objects
-async function createZipArchiveFromFiles(files) {
-  // Calculate sizes
-  let localHeadersSize = 0;
-  for (const f of files) {
-    localHeadersSize += 30 + f.nameBytes.length + f.fileData.length;
-  }
-  
-  const centralDirSize = files.reduce((sum, f) => sum + 46 + f.nameBytes.length, 0);
-  const totalSize = localHeadersSize + centralDirSize + 22;
-  
-  const result = new Uint8Array(totalSize);
-  
-  // Write local file entries
-  let offset = 0;
-  for (const f of files) {
-    f.localOffset = offset;
-    
-    const header = new Uint8Array(30 + f.nameBytes.length);
-    const view = new DataView(header.buffer);
-    
-    view.setUint32(0, 0x04034b50, true);
-    view.setUint16(4, 20, true);
-    view.setUint16(6, 0, true);
-    view.setUint16(8, 0, true);
-    view.setUint16(10, 0, true);
-    view.setUint16(12, 0, true);
-    view.setUint32(14, f.crc, true);
-    view.setUint32(18, f.fileData.length, true);
-    view.setUint32(22, f.fileData.length, true);
-    view.setUint16(26, f.nameBytes.length, true);
-    view.setUint16(28, 0, true);
-    header.set(f.nameBytes, 30);
-    
-    result.set(header, offset);
-    result.set(f.fileData, offset + header.length);
-    offset += header.length + f.fileData.length;
-  }
-  
-  const cdStartOffset = offset;
-  
-  // Write central directory
-  for (const f of files) {
-    const cdHeader = new Uint8Array(46);
-    const cdView = new DataView(cdHeader.buffer);
-    
-    cdView.setUint32(0, 0x02014b50, true);
-    cdView.setUint16(4, 20, true);
-    cdView.setUint16(6, 20, true);
-    cdView.setUint16(8, 0, true);
-    cdView.setUint16(10, 0, true);
-    cdView.setUint16(12, 0, true);
-    cdView.setUint16(14, 0, true);
-    cdView.setUint32(16, f.crc, true);
-    cdView.setUint32(20, f.fileData.length, true);
-    cdView.setUint32(24, f.fileData.length, true);
-    cdView.setUint16(28, f.nameBytes.length, true);
-    cdView.setUint16(30, 0, true);
-    cdView.setUint16(32, 0, true);
-    cdView.setUint16(34, 0, true);
-    cdView.setUint16(36, 0, true);
-    cdView.setUint32(38, 0, true);
-    cdView.setUint32(42, f.localOffset, true);
-    
-    result.set(cdHeader, offset);
-    result.set(f.nameBytes, offset + 46);
-    offset += 46 + f.nameBytes.length;
-  }
-  
-  const cdSize = offset - cdStartOffset;
-  
-  // Write EOCD
-  const eocd = new Uint8Array(22);
-  const eocdView = new DataView(eocd.buffer);
-  eocdView.setUint32(0, 0x06054b50, true);
-  eocdView.setUint16(4, 0, true);
-  eocdView.setUint16(6, 0, true);
-  eocdView.setUint16(8, files.length, true);
-  eocdView.setUint16(10, files.length, true);
-  eocdView.setUint32(12, cdSize, true);
-  eocdView.setUint32(16, cdStartOffset, true);
-  eocdView.setUint16(20, 0, true);
-  
-  result.set(eocd, offset);
-  
-  return new Blob([result], { type: 'application/zip' });
 }
