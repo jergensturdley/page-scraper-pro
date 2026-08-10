@@ -128,7 +128,7 @@ describe('Popup UI Bug Fixes', () => {
 
     test('popup.js has no duplicate function definitions', () => {
       const popupJs = fs.readFileSync(popupJsPath, 'utf8');
-      const funcDeclPattern = /function\s+(\w+)\s*\(/g;
+      const funcDeclPattern = /(?:^|\n)\s*(?:async\s+)?function\s+(\w+)\s*\(/g;
       const names = {};
       let match;
       while ((match = funcDeclPattern.exec(popupJs)) !== null) {
@@ -136,6 +136,8 @@ describe('Popup UI Bug Fixes', () => {
       }
       const duplicates = Object.entries(names).filter(([, count]) => count > 1);
       expect(duplicates).toEqual([]);
+      expect(names.openSettings).toBe(1);
+      expect(popupJs).not.toContain('modal.innerHTML');
     });
 
     test('detectSidebarMode called after DOMContentLoaded and elements init', () => {
@@ -985,8 +987,8 @@ describe('Task 7 keyboard accessibility contracts', () => {
     const trigger = { focus: jest.fn() };
     const first = { focus: jest.fn() };
     const dialog = { open: false, showModal: jest.fn(function () { this.open = true; }), close: jest.fn(function () { this.open = false; }) };
-    const controller = context.createDialogController(dialog, () => first);
-    controller.open(trigger);
+    const controller = context.createDialogController(dialog);
+    controller.open(trigger, first);
     expect(dialog.showModal).toHaveBeenCalled();
     expect(first.focus).toHaveBeenCalled();
     controller.close();
@@ -1004,4 +1006,110 @@ describe('Task 7 keyboard accessibility contracts', () => {
     expect(source).toContain("removeBtn.setAttribute('aria-label'");
     expect(source).not.toMatch(/querySelector\(`\.image-item img\[src="\$\{src\}"\]`\)/);
   });
+
+  test('download dialog receives an explicit in-dialog initial focus target', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const openDownload = source.slice(
+      source.indexOf('function openDownloadPanel()'),
+      source.indexOf('// Close download panel')
+    );
+    expect(openDownload).toContain("downloadDialogController.open(document.getElementById('openPanelBtn'), document.getElementById('downloadConfirmBtn'));");
+  });
+
+  test('positive integer settings reject blank, fractional, zero, negative, and non-finite values', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const start = source.indexOf('function parsePositiveIntegerSetting(');
+    const end = source.indexOf('function handleImagePreviewClick(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    if (start < 0 || end < 0) return;
+    const context = {};
+    vm.runInNewContext(`${source.slice(start, end)}\nthis.parsePositiveIntegerSetting = parsePositiveIntegerSetting;`, context);
+    for (const value of ['', '1.5', '0', '-2', 'Infinity', Infinity, NaN]) {
+      expect(context.parsePositiveIntegerSetting(value)).toBeNull();
+    }
+    expect(context.parsePositiveIntegerSetting('1')).toBe(1);
+    expect(context.parsePositiveIntegerSetting('240')).toBe(240);
+  });
+
+  test('settings dimension validation reports and focuses the first invalid input', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const start = source.indexOf('function parsePositiveIntegerSetting(');
+    const end = source.indexOf('function handleImagePreviewClick(', start);
+    const context = {};
+    vm.runInNewContext(`${source.slice(start, end)}\nthis.validateSettingsDimensions = validateSettingsDimensions;`, context);
+    const makeInput = value => ({ value, setCustomValidity: jest.fn(), focus: jest.fn(), reportValidity: jest.fn() });
+    const invalidWidth = makeInput('1.5');
+    const validHeight = makeInput('100');
+
+    expect(context.validateSettingsDimensions(invalidWidth, validHeight)).toBeNull();
+    expect(invalidWidth.setCustomValidity).toHaveBeenCalledWith('Enter a positive whole number.');
+    expect(validHeight.setCustomValidity).toHaveBeenCalledWith('');
+    expect(invalidWidth.focus).toHaveBeenCalled();
+    expect(invalidWidth.reportValidity).toHaveBeenCalled();
+
+    const validWidth = makeInput('20');
+    expect(context.validateSettingsDimensions(validWidth, validHeight)).toEqual({ minWidth: 20, minHeight: 100 });
+  });
+
+  test('settings inputs require values and invalid settings focus without saving', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    expect(html).toMatch(/id="minWidth"[^>]*required/);
+    expect(html).toMatch(/id="minHeight"[^>]*required/);
+    const saveSource = source.slice(source.indexOf('function saveSettings('));
+    expect(saveSource).toContain('validateSettingsDimensions(minWidthInput, minHeightInput)');
+    expect(source).toContain('invalidInput.focus();');
+    expect(saveSource.indexOf('return;')).toBeLessThan(saveSource.indexOf('chrome.storage.local.set'));
+  });
+
+  test('invalid setting submissions never persist', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const helpersStart = source.indexOf('function parsePositiveIntegerSetting(');
+    const helpersEnd = source.indexOf('function handleImagePreviewClick(', helpersStart);
+    const saveStart = source.indexOf('function saveSettings(');
+    const storageSet = jest.fn();
+    const makeInput = value => ({ value, checked: true, setCustomValidity: jest.fn(), focus: jest.fn(), reportValidity: jest.fn() });
+    const fields = {
+      minSizeCheck: makeInput(''),
+      minWidth: makeInput('100'),
+      minHeight: makeInput('100'),
+      excludeNav: makeInput('')
+    };
+    const context = {
+      document: { getElementById: id => fields[id] },
+      chrome: { storage: { local: { set: storageSet } } },
+      showToast: jest.fn(),
+      settingsDialogController: { close: jest.fn() }
+    };
+    vm.runInNewContext(`let settings = {};\n${source.slice(helpersStart, helpersEnd)}\n${source.slice(saveStart)}\nthis.saveSettings = saveSettings;`, context);
+
+    for (const invalid of ['', '1.5', '0', '-2', 'Infinity']) {
+      fields.minWidth.value = invalid;
+      context.saveSettings({ preventDefault: jest.fn() });
+    }
+    expect(storageSet).not.toHaveBeenCalled();
+
+    fields.minWidth.value = '25';
+    context.saveSettings({ preventDefault: jest.fn() });
+    expect(storageSet).toHaveBeenCalledTimes(1);
+  });
+
+  test('image preview click toggles on Shift or an existing selection and otherwise allows anchor navigation', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const start = source.indexOf('function handleImagePreviewClick(');
+    const end = source.indexOf('const toastController', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    if (start < 0 || end < 0) return;
+    const context = {};
+    vm.runInNewContext(`${source.slice(start, end)}\nthis.handleImagePreviewClick = handleImagePreviewClick;`, context);
+
+    for (const [shiftKey, hasSelection, shouldToggle] of [[true, false, true], [false, true, true], [false, false, false]]) {
+      const event = { shiftKey, preventDefault: jest.fn() };
+      const toggle = jest.fn();
+      context.handleImagePreviewClick(event, hasSelection, toggle);
+      expect(event.preventDefault).toHaveBeenCalledTimes(shouldToggle ? 1 : 0);
+      expect(toggle).toHaveBeenCalledTimes(shouldToggle ? 1 : 0);
+    }
+  });
+
 });

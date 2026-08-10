@@ -487,15 +487,14 @@ const elements = {
   downloadPanel: document.getElementById('downloadPanel')
 };
 
-function createDialogController(dialog, getInitialFocus) {
+function createDialogController(dialog) {
   let returnFocus = null;
 
   return {
-    open(trigger) {
+    open(trigger, initialFocus) {
       if (!dialog || dialog.open) return;
       returnFocus = trigger || null;
       dialog.showModal();
-      const initialFocus = getInitialFocus ? getInitialFocus() : null;
       if (initialFocus && typeof initialFocus.focus === 'function') initialFocus.focus();
     },
     close() {
@@ -510,10 +509,37 @@ function createDialogController(dialog, getInitialFocus) {
   };
 }
 
+function parsePositiveIntegerSetting(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function validateSettingsDimensions(minWidthInput, minHeightInput) {
+  const minWidth = parsePositiveIntegerSetting(minWidthInput.value);
+  const minHeight = parsePositiveIntegerSetting(minHeightInput.value);
+  minWidthInput.setCustomValidity(minWidth === null ? 'Enter a positive whole number.' : '');
+  minHeightInput.setCustomValidity(minHeight === null ? 'Enter a positive whole number.' : '');
+  const invalidInput = minWidth === null ? minWidthInput : (minHeight === null ? minHeightInput : null);
+  if (invalidInput) {
+    invalidInput.focus();
+    invalidInput.reportValidity();
+    return null;
+  }
+  return { minWidth, minHeight };
+}
+
+function handleImagePreviewClick(event, hasSelection, toggleSelection) {
+  if (!event.shiftKey && !hasSelection) return;
+  event.preventDefault();
+  toggleSelection();
+}
+
 const toastController = createToastController(elements.toast);
 const workspaceTabController = createWorkspaceTabController(cancelPendingWorkspaceSave);
-const settingsDialogController = createDialogController(elements.settingsDialog, () => elements.closeSettingsBtn);
-const downloadDialogController = createDialogController(elements.downloadPanel, () => document.getElementById('closePanelBtn'));
+const settingsDialogController = createDialogController(elements.settingsDialog);
+const downloadDialogController = createDialogController(elements.downloadPanel);
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1335,6 +1361,9 @@ function renderImages() {
     imgEl.alt = accessibleName;
     imgEl.loading = 'lazy';
     openLink.appendChild(imgEl);
+    openLink.addEventListener('click', event => {
+      handleImagePreviewClick(event, selectedImages.size > 0, () => toggleImageSelection(img.src, item));
+    });
     item.appendChild(openLink);
 
     const overlay = document.createElement('div');
@@ -2453,7 +2482,7 @@ function openDownloadPanel() {
   if (panel) {
     panel.classList.add('open');
     renderDownloadPanel();
-    downloadDialogController.open(document.getElementById('openPanelBtn'));
+    downloadDialogController.open(document.getElementById('openPanelBtn'), document.getElementById('downloadConfirmBtn'));
   }
 }
 
@@ -2550,7 +2579,7 @@ function openSettings() {
   minWidth.value = settings.minWidth || 100;
   minHeight.value = settings.minHeight || 100;
   excludeNav.checked = settings.excludeNav;
-  settingsDialogController.open(elements.settingsBtn);
+  settingsDialogController.open(elements.settingsBtn, elements.closeSettingsBtn);
 }
 
 function loadSettings() {
@@ -2568,14 +2597,12 @@ function saveSettings(event) {
   if (event) event.preventDefault();
   const minWidthInput = document.getElementById('minWidth');
   const minHeightInput = document.getElementById('minHeight');
-  if (!minWidthInput.checkValidity() || !minHeightInput.checkValidity()) {
-    (minWidthInput.checkValidity() ? minHeightInput : minWidthInput).reportValidity();
-    return;
-  }
+  const dimensions = validateSettingsDimensions(minWidthInput, minHeightInput);
+  if (!dimensions) return;
   settings = {
     minSize: document.getElementById('minSizeCheck').checked,
-    minWidth: Math.max(1, parseInt(minWidthInput.value, 10)),
-    minHeight: Math.max(1, parseInt(minHeightInput.value, 10)),
+    minWidth: dimensions.minWidth,
+    minHeight: dimensions.minHeight,
     excludeNav: document.getElementById('excludeNav').checked
   };
 
