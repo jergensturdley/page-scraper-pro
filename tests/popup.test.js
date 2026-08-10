@@ -295,6 +295,43 @@ describe('Image content classification', () => {
     expect(result.reasons.length).toBeGreaterThan(0);
   });
 
+  test('rejects badges even when their dimensions are otherwise content-sized', () => {
+    const result = loadPopupHelpers().classifyImageCandidate({
+      src: 'https://example.com/member-badge.png',
+      alt: 'Member badge',
+      width: 400,
+      height: 400,
+      inMain: true
+    });
+
+    expect(result.classification).toBe('junk');
+    expect(result.reasons.join(' ')).toContain('badge');
+  });
+
+  test('penalizes extreme panorama and banner aspect ratios', () => {
+    const result = loadPopupHelpers().classifyImageCandidate({
+      src: 'https://example.com/wide-scene.jpg',
+      width: 1200,
+      height: 200
+    });
+
+    expect(result.classification).toBe('junk');
+    expect(result.reasons.join(' ')).toContain('aspect ratio');
+  });
+
+  test('rewards meaningful descriptive alt text for a borderline main image', () => {
+    const result = loadPopupHelpers().classifyImageCandidate({
+      src: 'https://example.com/fox.jpg',
+      alt: 'A red fox crossing a snowy field',
+      width: 200,
+      height: 150,
+      inMain: true
+    });
+
+    expect(result.classification).toBe('content');
+    expect(result.reasons.join(' ')).toContain('descriptive alt text');
+  });
+
   test('returns an explainable deterministic result for uncertain and malformed candidates', () => {
     const { classifyImageCandidate } = loadPopupHelpers();
     expect(() => classifyImageCandidate(null)).not.toThrow();
@@ -303,6 +340,24 @@ describe('Image content classification', () => {
       expect.objectContaining({ classification: expect.stringMatching(/^(content|junk)$/), score: expect.any(Number) })
     );
     expect(classifyImageCandidate({ src: 'https://example.com/photo.jpg', width: 150, height: 150 }).reasons.length).toBeGreaterThan(0);
+  });
+
+  test('keeps popup and injected classifier scoring logic identical', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const pureStart = source.indexOf('function classifyImageCandidate(candidate) {');
+    const pureEnd = source.indexOf('// Function that can be injected', pureStart);
+    const injectedStart = source.indexOf('const classifyImageCandidate = candidate => {', pureEnd);
+    const injectedEnd = source.indexOf('const defaults = {', injectedStart);
+    const normalizeBody = (body) => body
+      .slice(body.indexOf('{') + 1, body.lastIndexOf('}'))
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .join('\n');
+
+    expect(normalizeBody(source.slice(injectedStart, injectedEnd))).toBe(
+      normalizeBody(source.slice(pureStart, pureEnd))
+    );
   });
 
   test('ships Content as the active default with an All assets escape hatch', () => {

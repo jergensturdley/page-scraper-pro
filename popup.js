@@ -77,6 +77,9 @@ function classifyImageCandidate(candidate) {
   const src = stringValue(value.src);
   const alt = stringValue(value.alt);
   const descriptor = `${src} ${alt}`;
+  const meaningfulAlt = alt.trim().length >= 12 &&
+    alt.trim().split(/\s+/).length >= 3 &&
+    !/(?:^|[\s/_.-])(icon|logo|avatar|badge)(?:[\s/_.-]|$)/.test(alt);
   const width = numberValue(value.width);
   const height = numberValue(value.height);
   const reasons = [];
@@ -100,11 +103,18 @@ function classifyImageCandidate(candidate) {
   if (/(?:^|[\s/_.-])(icon|logo|avatar)(?:[\s/_.-]|$)/.test(descriptor)) {
     add(-5, 'icon, logo, or avatar indicator');
   }
+  if (/(?:^|[\s/_.-])badge(?:[\s/_.-]|$)/.test(descriptor)) {
+    add(-5, 'badge indicator');
+  }
+  if (meaningfulAlt) add(1, 'descriptive alt text');
 
   if (width > 0 && height > 0 && width <= 64 && height <= 64) {
     add(-4, 'tiny dimensions');
   } else if (width > 0 && height > 0 && Math.min(width, height) <= 80) {
     add(-2, 'compact dimensions');
+  }
+  if (width > 0 && height > 0 && Math.max(width, height) / Math.min(width, height) >= 4) {
+    add(-4, 'extreme aspect ratio');
   }
 
   if (flag('inNav') || flag('inHeader') || flag('inFooter') || flag('inButton')) {
@@ -522,6 +532,9 @@ function scrapePageFromContentFallback(scrapeSettings) {
     const src = stringValue(value.src);
     const alt = stringValue(value.alt);
     const descriptor = `${src} ${alt}`;
+    const meaningfulAlt = alt.trim().length >= 12 &&
+      alt.trim().split(/\s+/).length >= 3 &&
+      !/(?:^|[\s/_.-])(icon|logo|avatar|badge)(?:[\s/_.-]|$)/.test(alt);
     const width = numberValue(value.width);
     const height = numberValue(value.height);
     const reasons = [];
@@ -545,11 +558,18 @@ function scrapePageFromContentFallback(scrapeSettings) {
     if (/(?:^|[\s/_.-])(icon|logo|avatar)(?:[\s/_.-]|$)/.test(descriptor)) {
       add(-5, 'icon, logo, or avatar indicator');
     }
+    if (/(?:^|[\s/_.-])badge(?:[\s/_.-]|$)/.test(descriptor)) {
+      add(-5, 'badge indicator');
+    }
+    if (meaningfulAlt) add(1, 'descriptive alt text');
 
     if (width > 0 && height > 0 && width <= 64 && height <= 64) {
       add(-4, 'tiny dimensions');
     } else if (width > 0 && height > 0 && Math.min(width, height) <= 80) {
       add(-2, 'compact dimensions');
+    }
+    if (width > 0 && height > 0 && Math.max(width, height) / Math.min(width, height) >= 4) {
+      add(-4, 'extreme aspect ratio');
     }
 
     if (flag('inNav') || flag('inHeader') || flag('inFooter') || flag('inButton')) {
