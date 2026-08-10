@@ -57,6 +57,7 @@ Use a controlled HTTP test page containing: a 16×16 `favicon.ico`, a small `sit
 - [ ] Confirm the large editorial/product samples and legitimate `pixel-art.png` are retained. A normal-size legitimate image must not be rejected only because “pixel” or “tracking” occurs in its name/alt text.
 - [ ] Choose **All assets** and confirm every captured asset, including excluded favicon/logo/tracker samples, becomes available.
 - [ ] Exercise **Large**, **XL**, and **Domain**, then type a search matching both alt text and a URL. Confirm “no filter matches” is distinguishable from “no scraped data.”
+- [ ] On a controlled page containing both navigation and ordinary content links, turn **Exclude navigation links** off and scrape again; confirm navigation links are included. Turn it on and run the next scrape; confirm navigation links are excluded while ordinary content links remain.
 
 ### 4. Per-tab workspace, invalidation, and clearing
 
@@ -71,6 +72,7 @@ Use a controlled HTTP test page containing: a 16×16 `favicon.ico`, a small `sit
 
 - [ ] Run a successful scrape. Confirm the button exposes a busy state during work, controls recover, counts/results update, and the persistent success status is not immediately overwritten by a transient toast.
 - [ ] With valid results still displayed, induce a same-workspace scrape failure (for example, temporarily make script injection fail without navigating the document). Confirm the failure is announced and the last successful results remain available rather than being destructively replaced. Record the exact failure method.
+- [ ] Remove the induced failure and retry without navigating. Confirm the retry succeeds, clears the failure state, and replaces the prior results/status with the newly scraped state.
 - [ ] Confirm a restricted-page failure from section 2 is handled distinctly from an empty successful result.
 - [ ] Scrape a prepared page containing malformed URLs, missing optional fields, `javascript:` media/link candidates, and unknown video embed URLs. Confirm rendering does not execute script, create an unsafe clickable URL, interpolate markup, or crash; malformed items get safe defaults or are omitted.
 - [ ] Corrupt a saved session value only in a disposable test profile. Confirm malformed cached objects are rejected and the UI starts clean rather than crashing.
@@ -79,6 +81,7 @@ Use a controlled HTTP test page containing: a 16×16 `favicon.ico`, a small `sit
 
 - [ ] Scrape a page containing a YouTube embed, Vimeo embed, native HTML5 `<video>`, and direct `.mp4`/`.webm` links. Confirm YouTube/Vimeo previews resolve only for real provider hosts and native/direct videos have labelled open/copy controls.
 - [ ] Include a lookalike provider hostname and an unknown embed provider. Confirm it is not misidentified as YouTube/Vimeo and receives a usable accessible fallback/open link when the URL is safe.
+- [ ] Include iframes whose `width`/`height` attributes contain missing, negative, fractional, nonnumeric, extremely large, and malicious-looking string values. Confirm scraping and video rendering do not throw, distort/overflow the layout, or create unsafe actions; safe video open/copy actions still work.
 - [ ] On a page whose URL includes a path, query string, and hash, export/copy JSON. Confirm the top-level page URL is the complete original URL rather than only its origin.
 
 ### 7. Keyboard and assistive technology
