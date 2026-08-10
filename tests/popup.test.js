@@ -10,6 +10,7 @@ const popupJsPath = path.join(__dirname, '..', 'popup.js');
 const popupHtmlPath = path.join(__dirname, '..', 'popup.html');
 const backgroundJsPath = path.join(__dirname, '..', 'background.js');
 const manifestPath = path.join(__dirname, '..', 'manifest.json');
+const fflatePath = path.join(__dirname, '..', 'libs', 'fflate.umd.js');
 
 function loadPopupHelpers() {
   const popupJs = fs.readFileSync(popupJsPath, 'utf8');
@@ -1328,6 +1329,70 @@ describe('Least-privilege extension packaging', () => {
   test('does not package unsolicited page overlays or orphaned content styles', () => {
     expect(fs.existsSync(path.join(__dirname, '..', 'content.js'))).toBe(false);
     expect(fs.existsSync(path.join(__dirname, '..', 'content.css'))).toBe(false);
+  });
+
+  test('vendored fflate executes and exposes the streaming ZIP APIs background uses', () => {
+    const source = fs.readFileSync(fflatePath, 'utf8');
+    const module = { exports: {} };
+    const context = {
+      module,
+      exports: module.exports,
+      require,
+      TextEncoder,
+      TextDecoder,
+      Uint8Array,
+      setTimeout,
+      clearTimeout
+    };
+
+    vm.runInNewContext(source, context, { filename: 'libs/fflate.umd.js' });
+
+    expect(typeof module.exports.Zip).toBe('function');
+    expect(typeof module.exports.AsyncZipDeflate).toBe('function');
+  });
+
+  test('records the pinned fflate source and upstream MIT attribution', () => {
+    const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+    const license = fs.readFileSync(path.join(__dirname, '..', 'libs', 'fflate.LICENSE'), 'utf8');
+
+    expect(readme).toContain('official `umd/index.js` build from the pinned npm package `fflate@0.8.2`');
+    expect(license).toContain('MIT License');
+    expect(license).toContain('Copyright (c) 2023 Arjun Barrett');
+  });
+
+  test('packaged ZIP load failure notifies and chooses individual downloads', async () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    const helperStart = backgroundJs.indexOf('async function ensurePackagedZipLibrary');
+    const helperEnd = backgroundJs.indexOf('// Create ZIP from URLs', helperStart);
+    const helperSource = backgroundJs.slice(helperStart, helperEnd);
+    const context = {};
+    vm.runInNewContext(`${helperSource}\nthis.ensurePackagedZipLibrary = ensurePackagedZipLibrary;`, context);
+    const downloaded = [];
+    const notifications = [];
+    const errors = [];
+
+    const ready = await context.ensurePackagedZipLibrary(
+      ['https://example.com/a.png'],
+      ['hero.png'],
+      {
+        hasLibrary: () => false,
+        loadLibrary: () => { throw new Error('missing packaged file'); },
+        downloadIndividually: async (items) => downloaded.push(...items),
+        notify: (message) => notifications.push(message),
+        reportError: (...args) => errors.push(args)
+      }
+    );
+
+    expect(ready).toBe(false);
+    expect(downloaded).toEqual([{
+      url: 'https://example.com/a.png',
+      filename: 'hero.png',
+      defaultExtension: '.jpg'
+    }]);
+    expect(notifications).toEqual([
+      'Packaged ZIP support is unavailable. Downloading files individually.'
+    ]);
+    expect(errors).toHaveLength(1);
   });
 
   test('loads ZIP support only from the packaged extension library', () => {

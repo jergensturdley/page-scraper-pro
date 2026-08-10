@@ -47,7 +47,8 @@ page-scraper-pro/
 ├── styles.css         # Responsive dark interface styles
 ├── background.js      # Context menus, downloads, notifications, and ZIP handling
 ├── libs/
-│   └── fflate.umd.js  # Packaged ZIP dependency (no remote executable fallback)
+│   ├── fflate.umd.js  # Packaged fflate 0.8.2 UMD dependency
+│   └── fflate.LICENSE # Upstream MIT license and attribution
 ├── icons/             # Extension icons
 ├── tests/             # Jest regression tests
 └── README.md
@@ -65,7 +66,7 @@ Page Scraper Pro declares no broad host permission and no `<all_urls>` access.
 - `notifications`: Report context-menu and download outcomes
 - `sidePanel`: Offer the same interface in Chrome's side panel
 
-ZIP support is loaded only from the packaged `libs/fflate.umd.js`. If that local dependency cannot load, URL-based ZIP requests fall back to individual downloads and clearly report the reason; the extension never imports executable code from a CDN.
+ZIP support uses the official `umd/index.js` build from the pinned npm package `fflate@0.8.2`, vendored as `libs/fflate.umd.js`; its MIT license and copyright attribution are preserved in `libs/fflate.LICENSE`. The library is loaded only from the packaged `libs/fflate.umd.js`. If that local dependency cannot load, URL-based ZIP requests fall back to individual downloads and clearly report the reason; the extension never imports executable code from a CDN.
 
 ## Development
 

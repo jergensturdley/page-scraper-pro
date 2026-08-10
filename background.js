@@ -516,27 +516,45 @@ async function createAndDownloadZip(images, zipName) {
   }
 }
 
+async function ensurePackagedZipLibrary(urls, names, dependencies) {
+  const deps = dependencies || {
+    hasLibrary: () => typeof fflate !== 'undefined'
+      && typeof fflate.Zip === 'function'
+      && typeof fflate.AsyncZipDeflate === 'function',
+    loadLibrary: () => importScripts(chrome.runtime.getURL('libs/fflate.umd.js')),
+    downloadIndividually: (items) => downloadFiles(items),
+    notify: (message) => showNotification(message),
+    reportError: (...args) => console.error(...args)
+  };
+
+  if (deps.hasLibrary()) return true;
+  try {
+    deps.loadLibrary();
+    if (!deps.hasLibrary()) {
+      throw new Error('Packaged fflate does not expose the required streaming ZIP APIs');
+    }
+    console.log('fflate loaded from extension libs');
+    return true;
+  } catch (error) {
+    deps.reportError('Packaged ZIP support is unavailable; downloading files individually.', error);
+    deps.notify('Packaged ZIP support is unavailable. Downloading files individually.');
+    const safeNames = Array.isArray(names) ? names : [];
+    await deps.downloadIndividually(urls.map((url, index) => ({
+      url,
+      filename: safeNames[index] || `image-${index + 1}`,
+      defaultExtension: '.jpg'
+    })));
+    return false;
+  }
+}
+
 // Create ZIP from URLs (fetch images and create ZIP) using fflate streaming
 async function createZipFromUrls(urls, names) {
   console.log('createZipFromUrls streaming:', urls.length);
   showNotification(`Fetching ${urls.length} images and streaming ZIP...`);
 
   // Load ZIP support only from the library packaged with the extension.
-  if (typeof fflate === 'undefined') {
-    try {
-      importScripts(chrome.runtime.getURL('libs/fflate.umd.js'));
-      console.log('fflate loaded from extension libs');
-    } catch (error) {
-      console.error('Packaged ZIP support is unavailable; downloading files individually.', error);
-      showNotification('Packaged ZIP support is unavailable. Downloading files individually.');
-      await downloadFiles(urls.map((url, index) => ({
-        url,
-        filename: names[index] || `image-${index + 1}`,
-        defaultExtension: '.jpg'
-      })));
-      return;
-    }
-  }
+  if (!await ensurePackagedZipLibrary(urls, names)) return;
 
   // Create Zip stream
   const chunks = [];
