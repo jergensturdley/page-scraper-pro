@@ -222,7 +222,7 @@ function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET
   };
   const budget = Number.isFinite(sizeBudget) && sizeBudget > 0 ? Math.floor(sizeBudget) : WORKSPACE_SIZE_BUDGET_BYTES;
   const initialImageUrls = new Set(data.images.map(image => image.src));
-  serialized.selectedImageUrls = serialized.selectedImageUrls.map(normalizeHttpUrl).filter(url => initialImageUrls.has(url));
+  serialized.selectedImageUrls = serialized.selectedImageUrls.map(normalizeImageUrl).filter(url => initialImageUrls.has(url));
 
   if (jsonSize(serialized) > budget && data.text) {
     let low = 0;
@@ -286,7 +286,7 @@ function normalizeWorkspace(value, expectedTabId, expectedSourceUrl) {
     imageSearch: typeof value.imageSearch === 'string' ? value.imageSearch : '',
     linkSearch: typeof value.linkSearch === 'string' ? value.linkSearch : '',
     selectedImageUrls: Array.isArray(value.selectedImageUrls)
-      ? [...new Set(value.selectedImageUrls.map(normalizeHttpUrl).filter(url => imageUrls.has(url)))]
+      ? [...new Set(value.selectedImageUrls.map(normalizeImageUrl).filter(url => imageUrls.has(url)))]
       : []
   };
 }

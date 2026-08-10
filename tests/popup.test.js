@@ -1160,4 +1160,31 @@ describe('Task 7 keyboard accessibility contracts', () => {
     expect(renderSource).toContain('if (!safeImageUrl) return;');
   });
 
+  test('workspace round-trip preserves selected supported blob and constrained data images only', () => {
+    const { serializeWorkspace, normalizeWorkspace } = loadPopupHelpers();
+    const dataImage = `data:image/webp;base64,${Buffer.from('webp').toString('base64')}`;
+    const blobImage = 'blob:https://example.com/4d36e96b';
+    const unsupportedSvg = 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=';
+    const javascriptUrl = 'javascript:alert(1)';
+    const workspace = serializeWorkspace(77, {
+      sourceUrl: 'https://example.com/gallery',
+      scrapedAt: 1720000000000,
+      scrapedData: {
+        images: [
+          { src: blobImage, width: 100, height: 100 },
+          { src: dataImage, width: 100, height: 100 },
+          { src: unsupportedSvg, width: 100, height: 100 },
+          { src: javascriptUrl, width: 100, height: 100 }
+        ],
+        videos: [], audios: [], links: [], text: ''
+      },
+      selectedImageUrls: [blobImage, dataImage, unsupportedSvg, javascriptUrl]
+    });
+    const restored = normalizeWorkspace(workspace, 77, 'https://example.com/gallery');
+
+    expect(workspace.scrapedData.images.map(image => image.src)).toEqual([blobImage, dataImage]);
+    expect(workspace.selectedImageUrls).toEqual([blobImage, dataImage]);
+    expect(restored.selectedImageUrls).toEqual([blobImage, dataImage]);
+  });
+
 });
