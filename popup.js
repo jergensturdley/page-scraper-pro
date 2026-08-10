@@ -29,6 +29,7 @@ let scrapedAt = null;
 let activeResultTab = 'images';
 let workspaceSaveTimer = null;
 let workspaceStorageQueue = Promise.resolve();
+let toastTimer = null;
 
 function getVideoProviderId(url) {
   try {
@@ -417,6 +418,8 @@ const elements = {
   audioCount: document.getElementById('audioCount'),
   linkCount: document.getElementById('linkCount'),
   scrapeBtn: document.getElementById('scrapeBtn'),
+  scrapeBtnLabel: document.getElementById('scrapeBtnLabel'),
+  scrapeRegion: document.getElementById('scrapeRegion'),
   copyBtn: document.getElementById('copyBtn'),
   clearResultsBtn: document.getElementById('clearResultsBtn'),
   exportJson: document.getElementById('exportJson'),
@@ -426,6 +429,7 @@ const elements = {
   exportArchive: document.getElementById('exportArchive'),
   copyImageUrls: document.getElementById('copyImageUrls'),
   status: document.getElementById('status'),
+  toast: document.getElementById('toast'),
   imagesContainer: document.getElementById('imagesContainer'),
   videosContainer: document.getElementById('videosContainer'),
   audiosContainer: document.getElementById('audiosContainer'),
@@ -512,9 +516,11 @@ function resetInMemoryWorkspace(status = 'Ready') {
   const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
   if (contentChip) contentChip.classList.add('active');
   switchTab('images', false);
-  updateUI(false);
+  updateUI();
   updateSelectionToolbar();
   elements.scrapeBtn.disabled = false;
+  elements.scrapeBtn.classList.remove('loading');
+  elements.scrapeRegion.setAttribute('aria-busy', 'false');
   setScrapeButtonLabel('Scrape Page Data');
   elements.status.textContent = status;
 }
@@ -598,13 +604,14 @@ function formatRelativeTime(timestamp) {
 }
 
 function setScrapeButtonLabel(label) {
-  elements.scrapeBtn.innerHTML = `
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
-      <polyline points="7.5 12 12 16 16.5 12"/>
-    </svg>
-    ${label}
-  `;
+  elements.scrapeBtnLabel.textContent = label;
+}
+
+function setScrapeBusy(isBusy) {
+  elements.scrapeRegion.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+  elements.scrapeBtn.disabled = isBusy;
+  elements.scrapeBtn.classList.toggle('loading', isBusy);
+  setScrapeButtonLabel(isBusy ? 'Scraping…' : (scrapedAt ? 'Rescrape' : 'Scrape Page Data'));
 }
 
 async function saveWorkspaceForTab(token = workspaceTabController.current()) {
@@ -659,7 +666,7 @@ async function restoreWorkspaceForCurrentTab(token = workspaceTabController.curr
     if (elements.linkFilter) elements.linkFilter.value = workspace.linkSearch;
     elements.filterChips.forEach(chip => chip.classList.toggle('active', chip.dataset.filter === currentImageFilter));
     switchTab(activeResultTab, false);
-    updateUI(false);
+    updateUI();
     updateSelectionToolbar();
     setScrapeButtonLabel('Rescrape');
     elements.status.textContent = `Restored from this tab · scraped ${formatRelativeTime(scrapedAt)}`;
@@ -774,10 +781,10 @@ function switchTab(tabName, persist = true) {
 // Scrape page data
 async function scrapePageData() {
   let operationToken = workspaceTabController.revise();
-  try {
-    elements.scrapeBtn.disabled = true;
-    elements.status.innerHTML = '<span class="spinner"></span> Scraping...';
+  setScrapeBusy(true);
+  elements.status.textContent = 'Scraping page…';
 
+  try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!workspaceTabController.isCurrent(operationToken)) return;
     if (!tab?.id) {
@@ -787,13 +794,13 @@ async function scrapePageData() {
     if (currentTabId !== tab.id) {
       operationToken = activateWorkspaceTab(tab.id, tab.windowId);
       resetInMemoryWorkspace();
-      elements.scrapeBtn.disabled = true;
+      setScrapeBusy(true);
+      elements.status.textContent = 'Scraping page…';
     } else {
       operationToken = workspaceTabController.current();
     }
     currentTabUrl = tab.url || '';
     updateCurrentPage(tab);
-    elements.status.innerHTML = '<span class="spinner"></span> Scraping...';
 
     // Pass a snapshot because injected functions do not share the popup context.
     const scrapeSettings = { ...settings };
@@ -804,54 +811,51 @@ async function scrapePageData() {
     });
     if (!workspaceTabController.isCurrent(operationToken)) return;
 
-    if (results && results[0] && results[0].result) {
-      scrapedData = copyLiveScrapedData(results[0].result);
-      scrapedAt = Date.now();
-      const imageUrls = new Set(scrapedData.images.map(image => image.src));
-      selectedImages = new Set([...selectedImages].filter(url => imageUrls.has(url)));
-      updateUI();
-      updateSelectionToolbar();
-      await saveWorkspaceForTab(operationToken);
-      if (workspaceTabController.isCurrent(operationToken)) showToast('Page scraped successfully!');
-    } else {
+    if (!results || !results[0] || !results[0].result) {
       throw new Error('No results returned');
     }
+
+    scrapedData = copyLiveScrapedData(results[0].result);
+    scrapedAt = Date.now();
+    const imageUrls = new Set(scrapedData.images.map(image => image.src));
+    selectedImages = new Set([...selectedImages].filter(url => imageUrls.has(url)));
+    updateUI();
+    updateSelectionToolbar();
+    elements.status.textContent = `Last scraped: ${new Date(scrapedAt).toLocaleTimeString()}`;
+    await saveWorkspaceForTab(operationToken);
+    if (workspaceTabController.isCurrent(operationToken)) showToast('Page scraped successfully!');
   } catch (error) {
     if (operationToken && !workspaceTabController.isCurrent(operationToken)) return;
     console.error('Scraping error:', error);
-    showToast('Error scraping page: ' + error.message);
-    elements.status.textContent = scrapedAt ? 'Results kept · rescrape failed' : 'Scrape failed';
+    const detail = error && error.message ? error.message : 'Unknown error';
+    const detailEnding = /[.!?]$/.test(detail) ? '' : '.';
+    const preservation = scrapedAt ? ' Existing results kept.' : '';
+    elements.status.textContent = `Scrape failed: ${detail}${detailEnding}${preservation} Check page access and try again.`;
+    showToast(`Scrape failed: ${detail}`);
   } finally {
     if (!operationToken || workspaceTabController.isCurrent(operationToken)) {
-      elements.scrapeBtn.disabled = false;
-      setScrapeButtonLabel(scrapedAt ? 'Rescrape' : 'Scrape Page Data');
+      setScrapeBusy(false);
     }
   }
 }
 
-// Update UI with scraped data
-function updateUI(updateStatus = true) {
+// Update UI with scraped data without changing the persistent operation status.
+function updateUI() {
   // Update stats
   elements.imageCount.textContent = scrapedData.images.length;
   elements.videoCount.textContent = scrapedData.videos.length;
   elements.audioCount.textContent = scrapedData.audios.length;
   elements.linkCount.textContent = scrapedData.links.length;
-  
+
   // Update copy button
   elements.copyBtn.disabled = scrapedData.images.length === 0 && scrapedData.videos.length === 0 && scrapedData.audios.length === 0 && scrapedData.links.length === 0;
-  
+
   // Update results
   renderImages();
   renderVideos();
   renderAudios();
   renderLinks();
   renderText();
-  
-  if (updateStatus) {
-    elements.status.textContent = scrapedAt
-      ? `Last scraped: ${new Date(scrapedAt).toLocaleTimeString()}`
-      : 'Ready';
-  }
 }
 
 // Fallback scrape function for scripting API
@@ -2170,13 +2174,14 @@ function calculateCRC32(data) {
 
 // Show toast notification
 function showToast(message) {
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.textContent = message;
-  document.body.appendChild(toast);
-  
-  setTimeout(() => {
-    toast.remove();
+  if (!elements.toast) return;
+  if (toastTimer) clearTimeout(toastTimer);
+  elements.toast.textContent = message;
+  elements.toast.hidden = false;
+  toastTimer = setTimeout(() => {
+    elements.toast.hidden = true;
+    elements.toast.textContent = '';
+    toastTimer = null;
   }, 3000);
 }
 

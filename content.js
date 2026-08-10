@@ -167,12 +167,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   
   if (request.action === 'copyToClipboard') {
-    navigator.clipboard.writeText(request.text).then(() => {
-      // Success - no response needed
-    }).catch(err => {
-      console.error('Clipboard write failed:', err);
-    });
-    return true; // Keep message channel open for async response
+    (async () => {
+      try {
+        await navigator.clipboard.writeText(request.text);
+        sendResponse({ success: true });
+      } catch (error) {
+        const message = error && error.message ? error.message : 'Clipboard write failed';
+        console.error('Clipboard write failed:', error);
+        sendResponse({ success: false, error: message });
+      }
+    })();
+    return true; // Keep the response channel open for the asynchronous clipboard result.
   }
 });
 

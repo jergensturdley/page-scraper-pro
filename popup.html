@@ -39,7 +39,7 @@
       </div>
     </header>
 
-    <main class="main">
+    <main class="main" id="scrapeRegion" aria-busy="false">
       <div class="url-bar">
         <span class="url-label">Current Page</span>
         <span class="url-text" id="currentPage">Loading...</span>
@@ -105,7 +105,7 @@
             <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
             <polyline points="7.5 12 12 16 16.5 12"/>
           </svg>
-          Scrape Page Data
+          <span id="scrapeBtnLabel">Scrape Page Data</span>
         </button>
         <button class="btn btn-secondary" id="copyBtn" disabled>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -263,7 +263,7 @@
     </main>
 
     <footer class="footer">
-      <div class="status" id="status">Ready</div>
+      <div class="status" id="status" role="status" aria-live="polite" aria-atomic="true">Ready</div>
       <div class="export-buttons">
         <button class="btn-small" id="exportJson" title="Export JSON">JSON</button>
         <button class="btn-small" id="exportImages" title="Download images">IMG</button>
@@ -293,6 +293,7 @@
     <div class="download-panel-list" id="downloadPanelList"></div>
   </div>
 
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
   <script src="popup.js"></script>
 </body>
 </html>

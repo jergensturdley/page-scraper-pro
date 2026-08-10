@@ -809,3 +809,61 @@ describe('Per-tab session workspace cache', () => {
     expect(backgroundSource).toContain('chrome.storage.session.remove');
   });
 });
+
+
+describe('Task 6 operation state and clipboard reporting contracts', () => {
+  test('persistent status and toast regions are live and atomic', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    expect(html).toMatch(/id="status"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
+    expect(html).toMatch(/id="toast"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
+  });
+
+  test('scrape operation exposes busy state and preserves durable status ownership', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const scrapeFunction = popupJs.slice(
+      popupJs.indexOf('async function scrapePageData()'),
+      popupJs.indexOf('// Update UI with scraped data')
+    );
+    const updateFunction = popupJs.slice(
+      popupJs.indexOf('function updateUI('),
+      popupJs.indexOf('// Fallback scrape function')
+    );
+
+    expect(popupJs).toContain("elements.scrapeRegion.setAttribute('aria-busy', isBusy ? 'true' : 'false');");
+    expect(scrapeFunction).toContain('setScrapeBusy(true);');
+    expect(scrapeFunction).toContain('setScrapeBusy(false);');
+    expect(scrapeFunction).toContain('Last scraped:');
+    expect(scrapeFunction).toContain('Existing results kept.');
+    expect(scrapeFunction).toContain('Check page access and try again.');
+    expect(updateFunction).not.toContain('elements.status');
+  });
+
+  test('toast announcements reuse one persistent region', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const toastFunction = popupJs.slice(
+      popupJs.indexOf('function showToast('),
+      popupJs.indexOf('// Detect if running as a side panel')
+    );
+    expect(toastFunction).toContain('elements.toast.textContent = message;');
+    expect(toastFunction).not.toContain("document.createElement('div')");
+    expect(toastFunction).not.toContain('document.body.appendChild');
+  });
+
+  test('content clipboard listener reports asynchronous success and failure', () => {
+    const contentJs = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+    const listener = contentJs.slice(contentJs.indexOf('chrome.runtime.onMessage.addListener'));
+    expect(listener).toContain('await navigator.clipboard.writeText(request.text);');
+    expect(listener).toContain('sendResponse({ success: true });');
+    expect(listener).toMatch(/sendResponse\(\{ success: false, error:/);
+    expect(listener).toContain('return true;');
+  });
+
+  test('background only announces clipboard success after a confirmed response', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    expect(backgroundJs).toContain('async function copyTextInTab(tabId, text)');
+    expect(backgroundJs).toContain('chrome.runtime.lastError');
+    expect(backgroundJs).toContain("if (!response || response.success !== true)");
+    expect(backgroundJs).toContain("showNotification('Could not copy to clipboard:");
+    expect(backgroundJs).toContain('await copyTextInTab(');
+  });
+});

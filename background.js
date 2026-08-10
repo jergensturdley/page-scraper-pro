@@ -53,26 +53,47 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // Handle context menu clicks
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   switch (info.menuItemId) {
     case 'scrape-images':
-      scrapeAndShow(tab, 'images');
+      await scrapeAndShow(tab, 'images');
       break;
     case 'scrape-links':
-      scrapeAndShow(tab, 'links');
+      await scrapeAndShow(tab, 'links');
       break;
     case 'scrape-selection':
       if (info.selectionText) {
-        // Send to content script to copy since background can't access clipboard
-        chrome.tabs.sendMessage(tab.id, {
-          action: 'copyToClipboard',
-          text: info.selectionText
-        });
-        showNotification('Selection copied to clipboard!');
+        try {
+          await copyTextInTab(tab.id, info.selectionText);
+          showNotification('Selection copied to clipboard!');
+        } catch (error) {
+          console.error('Clipboard error:', error);
+          showNotification('Could not copy to clipboard: ' + error.message);
+        }
       }
       break;
   }
 });
+
+async function copyTextInTab(tabId, text) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, {
+      action: 'copyToClipboard',
+      text
+    }, response => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'No content script is available on this page'));
+        return;
+      }
+      if (!response || response.success !== true) {
+        reject(new Error(response && response.error ? response.error : 'The page did not confirm the clipboard write'));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
 
 // Scrape and display results
 async function scrapeAndShow(tab, type) {
@@ -113,16 +134,13 @@ async function scrapeAndShow(tab, type) {
         ? data.images.map(img => img.src).join('\n')
         : data.links.map(link => link.href).join('\n');
       
-      // Send to content script for clipboard access
-      chrome.tabs.sendMessage(tab.id, {
-        action: 'copyToClipboard',
-        text: content
-      });
+      // Confirm the content script completed the clipboard write before reporting success.
+      await copyTextInTab(tab.id, content);
       showNotification(`${type === 'images' ? 'Images' : 'Links'} copied to clipboard!`);
     }
   } catch (error) {
     console.error('Scraping error:', error);
-    showNotification('Error scraping page');
+    showNotification(`Could not scrape or copy page data: ${error.message || 'Unknown error'}`);
   }
 }
 
