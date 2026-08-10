@@ -105,6 +105,32 @@ function normalizeHttpUrl(value) {
   }
 }
 
+const MAX_IMAGE_DATA_URL_LENGTH = 50000;
+
+function normalizeImageUrl(value) {
+  if (typeof value !== 'string' || !value) return '';
+  if (/^data:/i.test(value)) {
+    if (value.length > MAX_IMAGE_DATA_URL_LENGTH) return '';
+    const match = value.match(/^data:image\/(png|jpe?g|gif|webp|avif);base64,([A-Za-z0-9+/]+={0,2})$/i);
+    if (!match || match[2].length % 4 !== 0) return '';
+    return value;
+  }
+  if (/^blob:/i.test(value)) {
+    if (!/^blob:(?:https?:\/\/|chrome-extension:\/\/|null\/)[^\s]+$/i.test(value)) return '';
+    try {
+      return new URL(value).href;
+    } catch (error) {
+      return '';
+    }
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch (error) {
+    return '';
+  }
+}
+
 function safeDimension(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
@@ -113,7 +139,7 @@ function copyScrapedData(value) {
   const data = value && typeof value === 'object' ? value : {};
   const images = Array.isArray(data.images) ? data.images.flatMap(item => {
     if (!item || typeof item !== 'object') return [];
-    const src = normalizeHttpUrl(item.src);
+    const src = normalizeImageUrl(item.src);
     if (!src) return [];
     const image = {
       src,
@@ -530,8 +556,8 @@ function validateSettingsDimensions(minWidthInput, minHeightInput) {
   return { minWidth, minHeight };
 }
 
-function handleImagePreviewClick(event, hasSelection, toggleSelection) {
-  if (!event.shiftKey && !hasSelection) return;
+function handleImagePreviewClick(event, toggleSelection) {
+  if (!event.shiftKey) return;
   event.preventDefault();
   toggleSelection();
 }
@@ -1264,7 +1290,7 @@ function scrapePageFromContentFallback(scrapeSettings) {
 // Render images
 function renderImages() {
   const textFilter = elements.imageFilter ? elements.imageFilter.value.toLowerCase() : '';
-  let images = scrapedData.images;
+  let images = scrapedData.images.filter(img => normalizeImageUrl(img && img.src));
   
   // Apply classification or size filter based on currentImageFilter
   if (currentImageFilter === 'content') {
@@ -1345,24 +1371,21 @@ function renderImages() {
     checkbox.addEventListener('click', () => toggleImageSelection(img.src, item));
     item.appendChild(checkbox);
 
-    const safeImageUrl = normalizeHttpUrl(img.src);
+    const safeImageUrl = normalizeImageUrl(img.src);
+    if (!safeImageUrl) return;
     const openLink = document.createElement('a');
     openLink.className = 'image-open-link';
     openLink.target = '_blank';
     openLink.rel = 'noopener';
     openLink.setAttribute('aria-label', `Open ${accessibleName}`);
-    if (safeImageUrl) {
-      openLink.href = safeImageUrl;
-    } else {
-      openLink.setAttribute('aria-disabled', 'true');
-    }
+    openLink.href = safeImageUrl;
     const imgEl = document.createElement('img');
-    if (safeImageUrl) imgEl.src = safeImageUrl;
+    imgEl.src = safeImageUrl;
     imgEl.alt = accessibleName;
     imgEl.loading = 'lazy';
     openLink.appendChild(imgEl);
     openLink.addEventListener('click', event => {
-      handleImagePreviewClick(event, selectedImages.size > 0, () => toggleImageSelection(img.src, item));
+      handleImagePreviewClick(event, () => toggleImageSelection(img.src, item));
     });
     item.appendChild(openLink);
 

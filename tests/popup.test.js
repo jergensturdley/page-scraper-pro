@@ -1094,7 +1094,7 @@ describe('Task 7 keyboard accessibility contracts', () => {
     expect(storageSet).toHaveBeenCalledTimes(1);
   });
 
-  test('image preview click toggles on Shift or an existing selection and otherwise allows anchor navigation', () => {
+  test('image preview click toggles only on Shift and otherwise allows native anchor navigation', () => {
     const source = fs.readFileSync(popupJsPath, 'utf8');
     const start = source.indexOf('function handleImagePreviewClick(');
     const end = source.indexOf('const toastController', start);
@@ -1103,13 +1103,61 @@ describe('Task 7 keyboard accessibility contracts', () => {
     const context = {};
     vm.runInNewContext(`${source.slice(start, end)}\nthis.handleImagePreviewClick = handleImagePreviewClick;`, context);
 
-    for (const [shiftKey, hasSelection, shouldToggle] of [[true, false, true], [false, true, true], [false, false, false]]) {
-      const event = { shiftKey, preventDefault: jest.fn() };
+    for (const [eventOptions, shouldToggle] of [
+      [{ shiftKey: true }, true],
+      [{ shiftKey: false }, false],
+      [{ shiftKey: false, ctrlKey: true }, false],
+      [{ shiftKey: false, metaKey: true }, false]
+    ]) {
+      const event = { ...eventOptions, preventDefault: jest.fn() };
       const toggle = jest.fn();
-      context.handleImagePreviewClick(event, hasSelection, toggle);
+      context.handleImagePreviewClick(event, toggle);
       expect(event.preventDefault).toHaveBeenCalledTimes(shouldToggle ? 1 : 0);
       expect(toggle).toHaveBeenCalledTimes(shouldToggle ? 1 : 0);
     }
+  });
+
+
+  test('image selection button is revealed by keyboard focus', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+    expect(styles).toMatch(/\.image-checkbox:focus-visible[\s\S]*?opacity:\s*1/);
+    expect(styles).toMatch(/\.image-item:focus-within \.image-checkbox[\s\S]*?opacity:\s*1/);
+  });
+
+  test('normalizes only supported safe image media URLs', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const start = source.indexOf('const MAX_IMAGE_DATA_URL_LENGTH');
+    const end = source.indexOf('function safeDimension(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    if (start < 0 || end < 0) return;
+    const context = { URL };
+    vm.runInNewContext(`${source.slice(start, end)}\nthis.normalizeImageUrl = normalizeImageUrl;`, context);
+    const normalizeImageUrl = context.normalizeImageUrl;
+    const png = `data:image/png;base64,${Buffer.from('png').toString('base64')}`;
+
+    expect(normalizeImageUrl('https://example.com/photo.webp')).toBe('https://example.com/photo.webp');
+    expect(normalizeImageUrl('http://example.com/photo.jpg')).toBe('http://example.com/photo.jpg');
+    expect(normalizeImageUrl('blob:https://example.com/4d36e96b')).toBe('blob:https://example.com/4d36e96b');
+    expect(normalizeImageUrl(png)).toBe(png);
+    for (const value of [
+      'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      'data:text/html;base64,PGgxPmJhZDwvaDE+',
+      'data:image/png,not-base64',
+      'data:image/png;base64,%%%%',
+      `data:image/png;base64,${'A'.repeat(50000)}`,
+      'javascript:alert(1)',
+      'not a URL'
+    ]) expect(normalizeImageUrl(value)).toBe('');
+  });
+
+  test('rendering images uses the media-specific normalizer for both preview and open link', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const renderSource = source.slice(source.indexOf('function renderImages()'), source.indexOf('// Render links'));
+    expect(renderSource).toContain('normalizeImageUrl(img.src)');
+    expect(renderSource).not.toContain('normalizeHttpUrl(img.src)');
+    expect(renderSource).toContain('openLink.href = safeImageUrl;');
+    expect(renderSource).toContain('imgEl.src = safeImageUrl;');
+    expect(renderSource).toContain('if (!safeImageUrl) return;');
   });
 
 });

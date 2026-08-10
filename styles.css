@@ -551,7 +551,9 @@ body.sidebar-mode {
 }
 
 .image-item:hover .image-checkbox,
-.image-item.selected .image-checkbox {
+.image-item.selected .image-checkbox,
+.image-item:focus-within .image-checkbox,
+.image-checkbox:focus-visible {
   opacity: 1;
 }
 
