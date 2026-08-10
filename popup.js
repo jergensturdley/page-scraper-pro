@@ -390,6 +390,20 @@ function createToastController(element, options = {}) {
   return { show, reset };
 }
 
+function formatFilteredCount(visibleCount, totalCount, noun) {
+  return visibleCount === totalCount
+    ? `${totalCount} ${noun} found`
+    : `${visibleCount} of ${totalCount} ${noun} shown`;
+}
+
+function getEmptyResultsMessage(type, visibleCount, totalCount) {
+  if (visibleCount > 0) return '';
+  if (totalCount === 0) return type === 'images' ? 'No images found' : 'No links found';
+  return type === 'images'
+    ? 'No images match the current filters'
+    : 'No links match the current filter';
+}
+
 function classifyImageCandidate(candidate) {
   const value = candidate && typeof candidate === 'object' ? candidate : {};
   const context = value.context && typeof value.context === 'object' ? value.context : {};
@@ -570,9 +584,9 @@ const downloadDialogController = createDialogController(elements.downloadPanel);
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
+  configureWindowControls();
   const [tabToken] = await Promise.all([getCurrentTab(), loadSettings()]);
   await restoreWorkspaceForCurrentTab(tabToken);
-  detectSidebarMode();
 });
 
 // Get current tab info
@@ -1334,9 +1348,7 @@ function renderImages() {
     });
   }
 
-  elements.imagesCount.textContent = images.length === scrapedData.images.length
-    ? `${images.length} images found`
-    : `${images.length} of ${scrapedData.images.length} images shown`;
+  elements.imagesCount.textContent = formatFilteredCount(images.length, scrapedData.images.length, 'images');
 
   if (images.length === 0) {
     elements.imagesContainer.innerHTML = `
@@ -1346,7 +1358,7 @@ function renderImages() {
           <circle cx="8.5" cy="8.5" r="1.5"/>
           <polyline points="21 15 16 10 5 21"/>
         </svg>
-        <p>No images found</p>
+        <p>${getEmptyResultsMessage('images', images.length, scrapedData.images.length)}</p>
       </div>
     `;
     return;
@@ -1416,7 +1428,7 @@ function renderLinks() {
     );
   }
   
-  elements.linksCount.textContent = `${scrapedData.links.length} links found`;
+  elements.linksCount.textContent = formatFilteredCount(links.length, scrapedData.links.length, 'links');
   
   if (links.length === 0) {
     elements.linksContainer.innerHTML = `
@@ -1426,7 +1438,7 @@ function renderLinks() {
           <path d="M14 10l8-8"/>
           <path d="M14 2v6h6"/>
         </svg>
-        <p>No links found</p>
+        <p>${getEmptyResultsMessage('links', links.length, scrapedData.links.length)}</p>
       </div>
     `;
     return;
@@ -2376,41 +2388,16 @@ function showToast(message) {
   toastController.show(message);
 }
 
-// Detect if running as a side panel vs popup and apply appropriate mode
-// Side panels have large outerWidth (fills sidebar), popups are typically < 400px wide
-function detectSidebarMode() {
-  // Check if we're in a side panel by examining window dimensions
-  // Side panels are typically > 400px wide, popups are usually smaller
-  const isWideWindow = window.outerWidth >= 400;
-  
-  if (!isWideWindow) {
-    // This is a popup - hide sidebar button, allow popup-specific sizing
-    document.body.classList.remove('sidebar-mode');
-    document.body.classList.add('popup-mode');
-    if (elements.sidebarBtn) {
-      elements.sidebarBtn.style.display = 'none';
-    }
-    // Hide detachable button in popup mode
-    const detachBtn = document.getElementById('detachBtn');
-    if (detachBtn) {
-      detachBtn.style.display = 'none';
-    }
-  } else {
-    // This is likely a side panel or wider context
-    document.body.classList.add('sidebar-mode');
-    document.body.classList.remove('popup-mode');
-    // Hide popup-specific button in sidebar
-    if (elements.sidebarBtn) {
-      elements.sidebarBtn.style.display = 'none';
-    }
-    const detachBtn = document.getElementById('detachBtn');
-    if (detachBtn) {
-      detachBtn.style.display = 'flex';
-    }
-  }
+// Expose window controls only when the corresponding Chrome capability exists.
+function configureWindowControls() {
+  const canOpenSidePanel = Boolean(chrome.sidePanel && typeof chrome.sidePanel.open === 'function');
+  const canOpenWindow = Boolean(chrome.windows && typeof chrome.windows.create === 'function');
+
+  if (elements.sidebarBtn) elements.sidebarBtn.hidden = !canOpenSidePanel;
+  if (elements.detachBtn) elements.detachBtn.hidden = !canOpenWindow;
 }
 
-// Open in sidebar (for popup mode only)
+// Open the extension side panel when the browser supports it
 async function openInSidebar() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -2419,24 +2406,21 @@ async function openInSidebar() {
       window.close();
     }
   } catch (err) {
-    showToast('Could not open sidebar');
+    showToast('Could not open side panel');
   }
 }
 
-// Detach from sidebar to popup (for sidebar mode only)
+// Open the scraper in a standalone popup window.
 function detachToPopup() {
-  // In sidebar, we can't truly "detach" but we can provide a helpful message
-  // or open the popup in a new window if supported
-  showToast('Close sidebar, then click extension icon for popup');
-  // Alternative: use chrome.windows.create to open popup.html in a small window
   chrome.windows.create({
     url: chrome.runtime.getURL('popup.html'),
     type: 'popup',
     width: 540,
     height: 700
-  }, (win) => {
+  }, () => {
     if (chrome.runtime.lastError) {
       console.error('Window creation failed:', chrome.runtime.lastError);
+      showToast('Could not open new window');
     }
   });
 }

@@ -18,7 +18,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController, normalizeSourceDocumentUrl, getWorkspaceEvictionKeys, setWorkspaceWithEviction };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController, normalizeSourceDocumentUrl, getWorkspaceEvictionKeys, setWorkspaceWithEviction, formatFilteredCount, getEmptyResultsMessage };`, context);
   return context.popupHelpers;
 }
 
@@ -116,14 +116,15 @@ describe('Popup UI Bug Fixes', () => {
       expect(manifest.action.default_popup).toBe('popup.html');
     });
 
-    test('body popup dimensions are stable', () => {
+    test('body dimensions adapt without fixed viewport clipping', () => {
       const styles = fs.readFileSync(stylesPath, 'utf8');
       const bodyRule = getRule(styles, 'body');
       expect(bodyRule).not.toBeNull();
       const body = declarations(bodyRule);
-      expect(body.width).toBe('520px');
-      expect(body.height).toBe('600px');
-      expect(body['min-height']).toBe('0');
+      expect(body.width).toBe('100%');
+      expect(body['min-width']).toBe('320px');
+      expect(body.height).toBe('auto');
+      expect(body['overflow-y']).toBe('auto');
     });
 
     test('popup.js has no duplicate function definitions', () => {
@@ -140,27 +141,30 @@ describe('Popup UI Bug Fixes', () => {
       expect(popupJs).not.toContain('modal.innerHTML');
     });
 
-    test('detectSidebarMode called after DOMContentLoaded and elements init', () => {
+    test('window controls are capability-configured after DOM initialization', () => {
       const popupJs = fs.readFileSync(popupJsPath, 'utf8');
       const domReadyBlock = popupJs.match(/DOMContentLoaded[\s\S]*?\n\}\);/);
       expect(domReadyBlock).not.toBeNull();
-      expect(domReadyBlock[0]).toContain('detectSidebarMode');
+      expect(domReadyBlock[0]).toContain('configureWindowControls');
+      expect(domReadyBlock[0]).not.toContain('detectSidebarMode');
     });
 
   });
 
   describe('T2: Regression - Popup Expansion Bug', () => {
 
-    test('container is constrained to the popup viewport', () => {
+    test('container follows available width and can grow vertically', () => {
       const styles = fs.readFileSync(stylesPath, 'utf8');
       const containerRule = getRule(styles, '.container');
       expect(containerRule).not.toBeNull();
       const container = declarations(containerRule);
-      expect(container.height).toBe('100%');
-      expect(container['min-height']).toBe('0');
+      expect(container.width).toBe('100%');
+      expect(container['min-width']).toBe('0');
+      expect(container['min-height']).toBe('100vh');
+      expect(container.overflow).toBe('visible');
     });
 
-    test('sidebarBtn is defined in elements object before detectSidebarMode call', () => {
+    test('sidebarBtn is defined before capability configuration', () => {
       const popupJs = fs.readFileSync(popupJsPath, 'utf8');
       const elementsBlock = popupJs.match(/const elements = \{[\s\S]*?\};/);
       expect(elementsBlock).not.toBeNull();
@@ -846,7 +850,7 @@ describe('Task 6 operation state and clipboard reporting contracts', () => {
     const popupJs = fs.readFileSync(popupJsPath, 'utf8');
     const toastFunction = popupJs.slice(
       popupJs.indexOf('function showToast('),
-      popupJs.indexOf('// Detect if running as a side panel')
+      popupJs.indexOf('// Expose window controls')
     );
 
     expect(html).not.toMatch(/id="toast"[^>]*\shidden(?:\s|>)/);
@@ -1187,4 +1191,80 @@ describe('Task 7 keyboard accessibility contracts', () => {
     expect(restored.selectedImageUrls).toEqual([blobImage, dataImage]);
   });
 
+});
+
+
+describe('Responsive dark Operate interface contracts', () => {
+  test('defines a complete semantic dark token set with one electric-blue accent', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+
+    [
+      '--surface-canvas:', '--surface-subtle:', '--surface-raised:', '--surface-overlay:',
+      '--text-primary:', '--text-muted:', '--border:', '--accent:', '--focus:',
+      '--success:', '--warning:', '--error:', '--disabled:'
+    ].forEach(token => expect(styles).toContain(token));
+    expect(styles).not.toMatch(/linear-gradient|radial-gradient/);
+  });
+
+  test('allows document scrolling and adapts from a 320px popup to wider panels', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+
+    expect(styles).toMatch(/body\s*\{[^}]*min-width:\s*320px[^}]*width:\s*100%[^}]*overflow-y:\s*auto/s);
+    expect(styles).toMatch(/\.container\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0/s);
+    expect(styles).toMatch(/@media\s*\(max-width:\s*380px\)/);
+    expect(styles).toMatch(/@media\s*\(min-width:\s*700px\)/);
+    expect(styles).not.toMatch(/body\s*\{[^}]*width:\s*520px/s);
+  });
+
+  test('uses practical control targets and visible focus', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+
+    expect(styles).toMatch(/\.settings-btn\s*\{[^}]*min-width:\s*36px[^}]*min-height:\s*36px/s);
+    expect(styles).toMatch(/button:focus-visible[\s\S]*outline:\s*2px solid var\(--focus\)/);
+    expect(styles).toMatch(/button:disabled[\s\S]*var\(--disabled\)/);
+  });
+
+  test('makes the download dialog responsive rather than a covering side panel', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+
+    expect(styles).toMatch(/\.download-panel\s*\{[^}]*width:\s*min\(calc\(100% - 24px\),\s*480px\)[^}]*max-height:\s*min\(80vh,\s*640px\)/s);
+    expect(styles).not.toMatch(/\.download-panel\s*\{[^}]*transform:\s*translateX\(100%\)/s);
+  });
+
+  test('provides intentional reduced-motion alternatives', () => {
+    const styles = fs.readFileSync(stylesPath, 'utf8');
+
+    expect(styles).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    expect(styles).toMatch(/prefers-reduced-motion:[\s\S]*\.spinner[\s\S]*animation:\s*none/);
+    expect(styles).toMatch(/prefers-reduced-motion:[\s\S]*\.toast[\s\S]*transition:\s*none/);
+    expect(styles).toMatch(/prefers-reduced-motion:[\s\S]*\.settings-modal[\s\S]*animation:\s*none/);
+  });
+
+  test('uses API capability instead of viewport width to expose window controls', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+
+    expect(popupJs).not.toContain('detectSidebarMode');
+    expect(popupJs).not.toContain('window.outerWidth');
+    expect(popupJs).toContain('configureWindowControls();');
+    expect(popupJs).toContain("typeof chrome.sidePanel.open === 'function'");
+    expect(popupJs).toContain("typeof chrome.windows.create === 'function'");
+    expect(popupHtml).toContain('aria-label="Open in new window"');
+    expect(popupHtml).toContain('aria-label="Open side panel"');
+  });
+
+  test('formats filtered counts as visible versus total', () => {
+    const { formatFilteredCount } = loadPopupHelpers();
+
+    expect(formatFilteredCount(2, 5, 'images')).toBe('2 of 5 images shown');
+    expect(formatFilteredCount(5, 5, 'links')).toBe('5 links found');
+  });
+
+  test('distinguishes no scraped data from no filter matches', () => {
+    const { getEmptyResultsMessage } = loadPopupHelpers();
+
+    expect(getEmptyResultsMessage('images', 0, 0)).toBe('No images found');
+    expect(getEmptyResultsMessage('images', 0, 4)).toBe('No images match the current filters');
+    expect(getEmptyResultsMessage('links', 0, 3)).toBe('No links match the current filter');
+  });
 });
