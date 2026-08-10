@@ -1277,9 +1277,28 @@ describe('Least-privilege extension packaging', () => {
   test('uses activeTab without declarative page access', () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
-    expect(manifest.permissions).toEqual(expect.arrayContaining(['activeTab', 'scripting', 'storage']));
+    const expectedPermissions = [
+      'activeTab',
+      'storage',
+      'contextMenus',
+      'scripting',
+      'downloads',
+      'notifications',
+      'sidePanel'
+    ];
+    expect([...manifest.permissions].sort()).toEqual([...expectedPermissions].sort());
     expect(manifest.content_scripts).toBeUndefined();
-    expect(manifest.host_permissions || []).not.toContain('<all_urls>');
+    expect(manifest.host_permissions).toBeUndefined();
+  });
+
+  test('documents activeTab grant timing and navigation expiry accurately', () => {
+    const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+
+    expect(readme).toContain('Opening the extension from the toolbar or invoking its context menu grants temporary access to the current page');
+    expect(readme).toContain('Clicking **Scrape Page Data** uses that existing grant; the button itself does not grant access');
+    expect(readme).toContain('A persistent side panel may need the extension to be invoked again for the current page');
+    expect(readme).toContain('Navigating the tab to a different origin invalidates the grant');
+    expect(readme).not.toContain('Click **Scrape Page Data**. Chrome grants temporary access');
   });
 
   test('context-menu clipboard support is repeat-safe direct execution without listeners', () => {

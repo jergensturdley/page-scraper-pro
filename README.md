@@ -4,7 +4,7 @@ A Chrome extension for extracting images, videos, audio, links, and readable tex
 
 ## Features
 
-- **User-initiated scraping**: Page access is requested only after a popup/side-panel scrape action or a context-menu command
+- **User-initiated scraping**: Page access is temporary and begins only when the user invokes the extension from the toolbar or context menu
 - **Media and link extraction**: Collect images, video/audio sources, embeds, and page links
 - **Content filtering**: The default **Content** view ranks likely editorial, gallery, and product images while hiding obvious icons, favicons, tracking pixels, sprites, badges, avatars, and navigation assets; **All assets** remains available as an escape hatch
 - **Configurable filters**: Apply minimum image dimensions and optionally exclude navigation links
@@ -27,11 +27,13 @@ The extension does not inject a persistent content script, page overlay, image h
 ## Usage
 
 1. Navigate to the page you want to inspect.
-2. Open Page Scraper Pro from the toolbar or side panel.
-3. Click **Scrape Page Data**. Chrome grants temporary access to that active tab for this user action.
+2. Invoke Page Scraper Pro from the toolbar. Opening the extension from the toolbar or invoking its context menu grants temporary access to the current page.
+3. Click **Scrape Page Data**. Clicking **Scrape Page Data** uses that existing grant; the button itself does not grant access.
 4. Switch result tabs and choose **Content** or **All assets** for images.
 5. Select supported images for download, copy values, or export JSON.
 6. Use **Clear** to remove the current tab's saved session workspace.
+
+A persistent side panel may need the extension to be invoked again for the current page. Navigating the tab to a different origin invalidates the grant, so invoke the extension again before scraping the new page.
 
 A workspace is stored in `chrome.storage.session`, keyed by tab. It is not durable browsing history: it is removed when its tab closes and does not persist across a browser restart. Settings use extension storage separately.
 
