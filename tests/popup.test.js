@@ -18,7 +18,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController, normalizeSourceDocumentUrl, getWorkspaceEvictionKeys, setWorkspaceWithEviction };`, context);
   return context.popupHelpers;
 }
 
@@ -537,9 +537,9 @@ describe('Scraper settings injection', () => {
 
 describe('Per-tab session workspace cache', () => {
   const sampleData = {
-    images: [{ src: 'https://example.com/hero.jpg', alt: 'Hero' }],
-    videos: [{ url: 'https://example.com/movie.mp4' }],
-    audios: [{ url: 'https://example.com/audio.mp3' }],
+    images: [{ src: 'https://example.com/hero.jpg', alt: 'Hero', width: 0, height: 0 }],
+    videos: [{ src: 'https://example.com/movie.mp4', type: 'video', width: 0, height: 0, poster: '' }],
+    audios: [{ src: 'https://example.com/audio.mp3', type: 'audio' }],
     links: [{ href: 'https://example.com/about', text: 'About' }],
     text: 'Page text'
   };
@@ -547,7 +547,7 @@ describe('Per-tab session workspace cache', () => {
   test('creates a versioned key only for valid Chrome tab IDs', () => {
     const { getWorkspaceCacheKey } = loadPopupHelpers();
 
-    expect(getWorkspaceCacheKey(42)).toBe('page-scraper-workspace:v1:tab:42');
+    expect(getWorkspaceCacheKey(42)).toBe('scrape-session:v1:tab:42');
     for (const invalid of [undefined, null, 0, -1, 1.5, '42']) {
       expect(() => getWorkspaceCacheKey(invalid)).toThrow();
     }
@@ -558,6 +558,7 @@ describe('Per-tab session workspace cache', () => {
     const serialized = serializeWorkspace(42, {
       scrapedData: sampleData,
       scrapedAt: 1720000000000,
+      sourceUrl: 'https://example.com/page?x=1#section',
       activeResultTab: 'links',
       currentImageFilter: 'large',
       imageSearch: 'hero',
@@ -569,23 +570,26 @@ describe('Per-tab session workspace cache', () => {
       version: 1,
       tabId: 42,
       scrapedAt: 1720000000000,
+      sourceUrl: 'https://example.com/page?x=1',
       activeResultTab: 'links',
       currentImageFilter: 'large',
       imageSearch: 'hero',
       linkSearch: 'about'
     }));
-    expect(normalizeWorkspace(serialized, 42)).toEqual(expect.objectContaining({
+    expect(normalizeWorkspace(serialized, 42, 'https://example.com/page?x=1#other')).toEqual(expect.objectContaining({
       scrapedData: sampleData,
       selectedImageUrls: ['https://example.com/hero.jpg']
     }));
-    expect(normalizeWorkspace(serialized, 43)).toBeNull();
+    expect(normalizeWorkspace(serialized, 43, 'https://example.com/page?x=1')).toBeNull();
+    expect(normalizeWorkspace(serialized, 42, 'https://example.com/other')).toBeNull();
   });
 
   test('drops optional page text before structured results to meet a size budget', () => {
     const { serializeWorkspace } = loadPopupHelpers();
     const serialized = serializeWorkspace(7, {
       scrapedData: { ...sampleData, text: 'x'.repeat(5000) },
-      scrapedAt: 1720000000000
+      scrapedAt: 1720000000000,
+      sourceUrl: 'https://example.com/page'
     }, 900);
 
     expect(JSON.stringify(serialized).length).toBeLessThanOrEqual(900);
@@ -598,7 +602,7 @@ describe('Per-tab session workspace cache', () => {
 
   test('rejects a budget too small for even the required workspace envelope', () => {
     const { serializeWorkspace } = loadPopupHelpers();
-    expect(() => serializeWorkspace(7, { scrapedData: sampleData, scrapedAt: 1720000000000 }, 1)).toThrow(/size budget/i);
+    expect(() => serializeWorkspace(7, { scrapedData: sampleData, scrapedAt: 1720000000000, sourceUrl: 'https://example.com/page' }, 1)).toThrow(/size budget/i);
   });
 
   test.each([
@@ -620,8 +624,8 @@ describe('Per-tab session workspace cache', () => {
     const tabA = controller.activate(11);
     const tabB = controller.activate(22);
 
-    expect(tabA).toEqual({ tabId: 11, generation: 1 });
-    expect(tabB).toEqual({ tabId: 22, generation: 2 });
+    expect(tabA).toEqual({ tabId: 11, windowId: null, generation: 1 });
+    expect(tabB).toEqual({ tabId: 22, windowId: null, generation: 2 });
     expect(controller.current()).toEqual(tabB);
     expect(controller.isCurrent(tabA)).toBe(false);
     expect(controller.isCurrent(tabB)).toBe(true);
@@ -664,6 +668,127 @@ describe('Per-tab session workspace cache', () => {
     expect(resetSource).toContain('elements.scrapeBtn.disabled = false;');
   });
 
+  test('normalizes source document URLs by stripping only the hash', () => {
+    const { normalizeSourceDocumentUrl } = loadPopupHelpers();
+    expect(normalizeSourceDocumentUrl('https://example.com/path?q=1#section')).toBe('https://example.com/path?q=1');
+    expect(normalizeSourceDocumentUrl('not a URL')).toBe('');
+  });
+
+  test('ignores activation events owned by another browser window', () => {
+    const { createWorkspaceTabController } = loadPopupHelpers();
+    const cancel = jest.fn();
+    const controller = createWorkspaceTabController(cancel);
+    const original = controller.activate(11, 100);
+    cancel.mockClear();
+
+    expect(controller.acceptsWindow(200)).toBe(false);
+    expect(controller.current()).toEqual(original);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  test('Clear invalidates a pending same-tab restore token', async () => {
+    const { createWorkspaceTabController } = loadPopupHelpers();
+    const controller = createWorkspaceTabController(jest.fn());
+    const applyRestore = jest.fn();
+    let finishRestore;
+    const restore = new Promise(resolve => { finishRestore = resolve; });
+    const beforeClear = controller.activate(11, 100);
+    const completion = restore.then(() => controller.runIfCurrent(beforeClear, applyRestore));
+
+    const afterClear = controller.revise();
+    finishRestore();
+    await completion;
+
+    expect(afterClear).toEqual({ tabId: 11, windowId: 100, generation: 2 });
+    expect(applyRestore).not.toHaveBeenCalled();
+  });
+
+  test('same-tab A to B navigation invalidates the operation and rejects A cache', () => {
+    const { createWorkspaceTabController, serializeWorkspace, normalizeWorkspace } = loadPopupHelpers();
+    const controller = createWorkspaceTabController(jest.fn());
+    const tabA = controller.activate(11, 100);
+    const cachedA = serializeWorkspace(11, {
+      sourceUrl: 'https://example.com/a#section',
+      scrapedAt: 1720000000000,
+      scrapedData: { images: [], videos: [], audios: [], links: [], text: 'A' }
+    });
+
+    const tabB = controller.revise();
+
+    expect(tabB.tabId).toBe(tabA.tabId);
+    expect(tabB.generation).toBe(tabA.generation + 1);
+    expect(controller.isCurrent(tabA)).toBe(false);
+    expect(normalizeWorkspace(cachedA, 11, 'https://example.com/b')).toBeNull();
+  });
+
+  test('orders only other scrape workspaces from oldest to newest for eviction', () => {
+    const { getWorkspaceEvictionKeys } = loadPopupHelpers();
+    const entries = {
+      settings: { scrapedAt: 1 },
+      'scrape-session:v1:tab:1': { scrapedAt: 30 },
+      'scrape-session:v1:tab:2': { scrapedAt: 10 },
+      'scrape-session:v1:tab:3': { scrapedAt: 20 }
+    };
+    expect(getWorkspaceEvictionKeys(entries, 'scrape-session:v1:tab:3')).toEqual([
+      'scrape-session:v1:tab:2',
+      'scrape-session:v1:tab:1'
+    ]);
+  });
+
+  test('evicts the oldest other workspace and retries a quota-failed write once', async () => {
+    const { setWorkspaceWithEviction } = loadPopupHelpers();
+    const storage = {
+      set: jest.fn().mockRejectedValueOnce(new Error('QUOTA_BYTES')).mockResolvedValueOnce(),
+      get: jest.fn().mockResolvedValue({
+        'scrape-session:v1:tab:1': { scrapedAt: 30 },
+        'scrape-session:v1:tab:2': { scrapedAt: 10 }
+      }),
+      remove: jest.fn().mockResolvedValue()
+    };
+
+    await setWorkspaceWithEviction(storage, 'scrape-session:v1:tab:1', { version: 1 });
+
+    expect(storage.set).toHaveBeenCalledTimes(2);
+    expect(storage.remove).toHaveBeenCalledWith('scrape-session:v1:tab:2');
+  });
+
+  test('does not attempt a third write when the single retry also fails', async () => {
+    const { setWorkspaceWithEviction } = loadPopupHelpers();
+    const storage = {
+      set: jest.fn().mockRejectedValue(new Error('QUOTA_BYTES')),
+      get: jest.fn().mockResolvedValue({ 'scrape-session:v1:tab:2': { scrapedAt: 10 } }),
+      remove: jest.fn().mockResolvedValue()
+    };
+
+    await expect(setWorkspaceWithEviction(
+      storage,
+      'scrape-session:v1:tab:1',
+      { version: 1 }
+    )).rejects.toThrow('QUOTA_BYTES');
+    expect(storage.set).toHaveBeenCalledTimes(2);
+  });
+
+  test('drops malformed structured items and supplies render-safe defaults', () => {
+    const { serializeWorkspace, normalizeWorkspace } = loadPopupHelpers();
+    const serialized = serializeWorkspace(9, {
+      sourceUrl: 'https://example.com/page',
+      scrapedAt: 1720000000000,
+      scrapedData: {
+        images: [null, {}, { src: 4 }, { src: 'https://example.com/image.jpg', width: 'bad' }],
+        videos: [{}, { src: 'https://example.com/video.mp4', poster: 7 }],
+        audios: [{ src: null }, { src: 'https://example.com/audio.mp3' }],
+        links: [{ href: 3 }, { href: 'https://example.com', text: 4 }],
+        text: 'safe'
+      }
+    });
+    const restored = normalizeWorkspace(serialized, 9, 'https://example.com/page');
+
+    expect(restored.scrapedData.images).toEqual([{ src: 'https://example.com/image.jpg', alt: '', width: 0, height: 0 }]);
+    expect(restored.scrapedData.videos).toEqual([{ src: 'https://example.com/video.mp4', type: 'video', width: 0, height: 0, poster: '' }]);
+    expect(restored.scrapedData.audios).toEqual([{ src: 'https://example.com/audio.mp3', type: 'audio' }]);
+    expect(restored.scrapedData.links).toEqual([{ href: 'https://example.com/', text: '' }]);
+  });
+
   test('wires session-only restore, persistence, and cleanup controls', () => {
     const html = fs.readFileSync(popupHtmlPath, 'utf8');
     const popupSource = fs.readFileSync(popupJsPath, 'utf8');
@@ -671,10 +796,13 @@ describe('Per-tab session workspace cache', () => {
 
     expect(html).toMatch(/id="clearResultsBtn"[^>]*>[^<]*Clear results|id="clearResultsBtn"/);
     expect(popupSource).toContain('chrome.storage.session');
+    expect(popupSource).toContain('512 * 1024');
     expect(popupSource).toContain('restoreWorkspaceForCurrentTab');
     expect(popupSource).toContain('scheduleWorkspaceSave');
     expect(popupSource).toContain('chrome.tabs.onActivated.addListener');
     expect(popupSource).toContain('handleActiveTabChanged');
+    expect(popupSource).toContain('chrome.tabs.onUpdated.addListener');
+    expect(popupSource).toContain('handleCurrentTabUpdated');
     expect(popupSource).toContain('Restored from this tab · scraped');
     expect(popupSource).not.toMatch(/storage\.local.*workspace|workspace.*storage\.local/);
     expect(backgroundSource).toContain('chrome.tabs.onRemoved.addListener');

@@ -28,6 +28,7 @@ let currentTabId = null;
 let scrapedAt = null;
 let activeResultTab = 'images';
 let workspaceSaveTimer = null;
+let workspaceStorageQueue = Promise.resolve();
 
 function getVideoProviderId(url) {
   try {
@@ -71,8 +72,8 @@ function buildExportData(url, data) {
 }
 
 const WORKSPACE_CACHE_VERSION = 1;
-const WORKSPACE_CACHE_PREFIX = `page-scraper-workspace:v${WORKSPACE_CACHE_VERSION}:tab:`;
-const WORKSPACE_SIZE_BUDGET_BYTES = 1024 * 1024;
+const WORKSPACE_CACHE_PREFIX = `scrape-session:v${WORKSPACE_CACHE_VERSION}:tab:`;
+const WORKSPACE_SIZE_BUDGET_BYTES = 512 * 1024;
 const RESULT_TABS = new Set(['images', 'videos', 'audios', 'links', 'text']);
 const IMAGE_FILTERS = new Set(['content', 'all', 'large', 'xlarge', 'domain']);
 
@@ -81,6 +82,89 @@ function getWorkspaceCacheKey(tabId) {
     throw new TypeError('A positive integer tab ID is required');
   }
   return `${WORKSPACE_CACHE_PREFIX}${tabId}`;
+}
+
+function normalizeSourceDocumentUrl(value) {
+  if (typeof value !== 'string') return '';
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    return url.href;
+  } catch (error) {
+    return '';
+  }
+}
+
+function normalizeHttpUrl(value) {
+  if (typeof value !== 'string') return '';
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function safeDimension(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function copyScrapedData(value) {
+  const data = value && typeof value === 'object' ? value : {};
+  const images = Array.isArray(data.images) ? data.images.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const src = normalizeHttpUrl(item.src);
+    if (!src) return [];
+    const image = {
+      src,
+      alt: typeof item.alt === 'string' ? item.alt : '',
+      width: safeDimension(item.width),
+      height: safeDimension(item.height)
+    };
+    if (item.classification === 'content' || item.classification === 'junk') image.classification = item.classification;
+    if (Number.isFinite(item.classificationScore)) image.classificationScore = item.classificationScore;
+    if (Array.isArray(item.classificationReasons)) {
+      image.classificationReasons = item.classificationReasons.filter(reason => typeof reason === 'string');
+    }
+    if (item.context && typeof item.context === 'object') {
+      image.context = Object.fromEntries(Object.entries(item.context).filter(([, flag]) => typeof flag === 'boolean'));
+    }
+    return [image];
+  }) : [];
+  const videos = Array.isArray(data.videos) ? data.videos.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const src = normalizeHttpUrl(item.src);
+    if (!src) return [];
+    return [{
+      src,
+      type: typeof item.type === 'string' ? item.type : 'video',
+      width: safeDimension(item.width),
+      height: safeDimension(item.height),
+      poster: normalizeHttpUrl(item.poster)
+    }];
+  }) : [];
+  const audios = Array.isArray(data.audios) ? data.audios.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const src = normalizeHttpUrl(item.src);
+    return src ? [{ src, type: typeof item.type === 'string' ? item.type : 'audio' }] : [];
+  }) : [];
+  const links = Array.isArray(data.links) ? data.links.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const href = normalizeHttpUrl(item.href);
+    return href ? [{ href, text: typeof item.text === 'string' ? item.text : '' }] : [];
+  }) : [];
+  return { images, videos, audios, links, text: typeof data.text === 'string' ? data.text : '' };
+}
+
+function copyLiveScrapedData(value) {
+  const data = value && typeof value === 'object' ? value : {};
+  return {
+    images: Array.isArray(data.images) ? data.images.filter(item => item && typeof item === 'object') : [],
+    videos: Array.isArray(data.videos) ? data.videos.filter(item => item && typeof item === 'object') : [],
+    audios: Array.isArray(data.audios) ? data.audios.filter(item => item && typeof item === 'object') : [],
+    links: Array.isArray(data.links) ? data.links.filter(item => item && typeof item === 'object') : [],
+    text: typeof data.text === 'string' ? data.text : ''
+  };
 }
 
 function jsonSize(value) {
@@ -92,17 +176,6 @@ function jsonSize(value) {
   }
 }
 
-function copyScrapedData(value) {
-  const data = value && typeof value === 'object' ? value : {};
-  return {
-    images: Array.isArray(data.images) ? data.images.filter(item => item && typeof item === 'object') : [],
-    videos: Array.isArray(data.videos) ? data.videos.filter(item => item && typeof item === 'object') : [],
-    audios: Array.isArray(data.audios) ? data.audios.filter(item => item && typeof item === 'object') : [],
-    links: Array.isArray(data.links) ? data.links.filter(item => item && typeof item === 'object') : [],
-    text: typeof data.text === 'string' ? data.text : ''
-  };
-}
-
 function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET_BYTES) {
   getWorkspaceCacheKey(tabId);
   const value = workspace && typeof workspace === 'object' ? workspace : {};
@@ -110,6 +183,7 @@ function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET
   const serialized = {
     version: WORKSPACE_CACHE_VERSION,
     tabId,
+    sourceUrl: normalizeSourceDocumentUrl(value.sourceUrl),
     scrapedData: data,
     scrapedAt: Number.isFinite(value.scrapedAt) && value.scrapedAt > 0 ? value.scrapedAt : Date.now(),
     activeResultTab: RESULT_TABS.has(value.activeResultTab) ? value.activeResultTab : 'images',
@@ -121,8 +195,8 @@ function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET
       : []
   };
   const budget = Number.isFinite(sizeBudget) && sizeBudget > 0 ? Math.floor(sizeBudget) : WORKSPACE_SIZE_BUDGET_BYTES;
-  const initialImageUrls = new Set(data.images.map(image => image.src).filter(url => typeof url === 'string'));
-  serialized.selectedImageUrls = serialized.selectedImageUrls.filter(url => initialImageUrls.has(url));
+  const initialImageUrls = new Set(data.images.map(image => image.src));
+  serialized.selectedImageUrls = serialized.selectedImageUrls.map(normalizeHttpUrl).filter(url => initialImageUrls.has(url));
 
   if (jsonSize(serialized) > budget && data.text) {
     let low = 0;
@@ -140,8 +214,7 @@ function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET
   }
 
   // Structured results are reduced only after all optional page text is omitted.
-  const arrays = ['links', 'audios', 'videos', 'images'];
-  for (const name of arrays) {
+  for (const name of ['links', 'audios', 'videos', 'images']) {
     if (jsonSize(serialized) <= budget || data[name].length === 0) continue;
     const original = data[name];
     let low = 0;
@@ -154,32 +227,32 @@ function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET
     }
     data[name] = original.slice(0, low);
   }
-  const imageUrls = new Set(data.images.map(image => image.src).filter(url => typeof url === 'string'));
+  const imageUrls = new Set(data.images.map(image => image.src));
   serialized.selectedImageUrls = serialized.selectedImageUrls.filter(url => imageUrls.has(url));
-  if (jsonSize(serialized) > budget) {
-    throw new RangeError('Workspace cannot fit within the size budget');
-  }
+  if (jsonSize(serialized) > budget) throw new RangeError('Workspace cannot fit within the size budget');
   return serialized;
 }
 
-function normalizeWorkspace(value, expectedTabId) {
+function normalizeWorkspace(value, expectedTabId, expectedSourceUrl) {
   try {
     getWorkspaceCacheKey(expectedTabId);
   } catch (error) {
     return null;
   }
-  if (!value || typeof value !== 'object' || value.version !== WORKSPACE_CACHE_VERSION || value.tabId !== expectedTabId) {
+  const normalizedExpectedUrl = expectedSourceUrl === undefined ? null : normalizeSourceDocumentUrl(expectedSourceUrl);
+  const sourceUrl = normalizeSourceDocumentUrl(value && value.sourceUrl);
+  if (!value || typeof value !== 'object' || value.version !== WORKSPACE_CACHE_VERSION ||
+      value.tabId !== expectedTabId || !sourceUrl || (normalizedExpectedUrl !== null && sourceUrl !== normalizedExpectedUrl)) {
     return null;
   }
   const data = value.scrapedData;
   if (!data || typeof data !== 'object' || !Array.isArray(data.images) || !Array.isArray(data.videos) ||
       !Array.isArray(data.audios) || !Array.isArray(data.links) || typeof data.text !== 'string' ||
-      !Number.isFinite(value.scrapedAt) || value.scrapedAt <= 0) {
-    return null;
-  }
+      !Number.isFinite(value.scrapedAt) || value.scrapedAt <= 0) return null;
   const scrapedData = copyScrapedData(data);
-  const imageUrls = new Set(scrapedData.images.map(image => image.src).filter(url => typeof url === 'string'));
+  const imageUrls = new Set(scrapedData.images.map(image => image.src));
   return {
+    sourceUrl,
     scrapedData,
     scrapedAt: value.scrapedAt,
     activeResultTab: RESULT_TABS.has(value.activeResultTab) ? value.activeResultTab : 'images',
@@ -187,34 +260,69 @@ function normalizeWorkspace(value, expectedTabId) {
     imageSearch: typeof value.imageSearch === 'string' ? value.imageSearch : '',
     linkSearch: typeof value.linkSearch === 'string' ? value.linkSearch : '',
     selectedImageUrls: Array.isArray(value.selectedImageUrls)
-      ? [...new Set(value.selectedImageUrls.filter(url => typeof url === 'string' && imageUrls.has(url)))]
+      ? [...new Set(value.selectedImageUrls.map(normalizeHttpUrl).filter(url => imageUrls.has(url)))]
       : []
   };
 }
 
+function getWorkspaceEvictionKeys(entries, currentKey) {
+  const values = entries && typeof entries === 'object' ? entries : {};
+  return Object.keys(values)
+    .filter(key => key.startsWith(WORKSPACE_CACHE_PREFIX) && key !== currentKey)
+    .sort((left, right) => {
+      const leftTime = Number.isFinite(values[left]?.scrapedAt) ? values[left].scrapedAt : 0;
+      const rightTime = Number.isFinite(values[right]?.scrapedAt) ? values[right].scrapedAt : 0;
+      return leftTime - rightTime;
+    });
+}
+
+async function setWorkspaceWithEviction(storage, key, payload, shouldContinue = () => true) {
+  try {
+    await storage.set({ [key]: payload });
+    return true;
+  } catch (firstError) {
+    if (!shouldContinue()) return false;
+    const entries = await storage.get(null);
+    if (!shouldContinue()) return false;
+    const [oldestKey] = getWorkspaceEvictionKeys(entries, key);
+    if (!oldestKey) throw firstError;
+    await storage.remove(oldestKey);
+    if (!shouldContinue()) return false;
+    await storage.set({ [key]: payload });
+    return true;
+  }
+}
+
 function createWorkspaceTabController(cancelPendingSave) {
   let tabId = null;
+  let windowId = null;
   let generation = 0;
   const cancel = typeof cancelPendingSave === 'function' ? cancelPendingSave : () => {};
 
+  const token = () => ({ tabId, windowId, generation });
   return {
-    activate(nextTabId) {
-      if (!Number.isInteger(nextTabId) || nextTabId <= 0) {
-        throw new TypeError('A positive integer tab ID is required');
-      }
+    activate(nextTabId, nextWindowId = null) {
+      if (!Number.isInteger(nextTabId) || nextTabId <= 0) throw new TypeError('A positive integer tab ID is required');
       cancel();
       tabId = nextTabId;
+      windowId = Number.isInteger(nextWindowId) ? nextWindowId : windowId;
       generation += 1;
-      return { tabId, generation };
+      return token();
     },
-    current() {
-      return { tabId, generation };
+    revise() {
+      cancel();
+      generation += 1;
+      return token();
     },
-    isCurrent(token) {
-      return Boolean(token) && token.tabId === tabId && token.generation === generation;
+    acceptsWindow(candidateWindowId) {
+      return windowId !== null && candidateWindowId === windowId;
     },
-    runIfCurrent(token, callback) {
-      if (!this.isCurrent(token) || typeof callback !== 'function') return false;
+    current: token,
+    isCurrent(candidate) {
+      return Boolean(candidate) && candidate.tabId === tabId && candidate.windowId === windowId && candidate.generation === generation;
+    },
+    runIfCurrent(candidate, callback) {
+      if (!this.isCurrent(candidate) || typeof callback !== 'function') return false;
       callback();
       return true;
     }
@@ -354,8 +462,8 @@ function cancelPendingWorkspaceSave() {
   workspaceSaveTimer = null;
 }
 
-function activateWorkspaceTab(tabId) {
-  const token = workspaceTabController.activate(tabId);
+function activateWorkspaceTab(tabId, windowId) {
+  const token = workspaceTabController.activate(tabId, windowId);
   currentTabId = token.tabId;
   return token;
 }
@@ -382,7 +490,7 @@ async function getCurrentTab() {
       return null;
     }
 
-    const token = activateWorkspaceTab(tab.id);
+    const token = activateWorkspaceTab(tab.id, tab.windowId);
     updateCurrentPage(tab);
     return token;
   } catch (error) {
@@ -412,8 +520,9 @@ function resetInMemoryWorkspace(status = 'Ready') {
 }
 
 async function handleActiveTabChanged(activeInfo) {
-  if (!activeInfo || !Number.isInteger(activeInfo.tabId) || activeInfo.tabId <= 0) return;
-  const token = activateWorkspaceTab(activeInfo.tabId);
+  if (!activeInfo || !Number.isInteger(activeInfo.tabId) || activeInfo.tabId <= 0 ||
+      !workspaceTabController.acceptsWindow(activeInfo.windowId)) return;
+  const token = activateWorkspaceTab(activeInfo.tabId, activeInfo.windowId);
   currentTabUrl = '';
   elements.currentPage.textContent = 'Loading...';
   resetInMemoryWorkspace();
@@ -431,6 +540,28 @@ async function handleActiveTabChanged(activeInfo) {
   await restoreWorkspaceForCurrentTab(token);
 }
 
+async function handleCurrentTabUpdated(tabId, changeInfo, tab) {
+  if (tabId !== currentTabId || !changeInfo || typeof changeInfo.url !== 'string') return;
+  const previousUrl = normalizeSourceDocumentUrl(currentTabUrl);
+  const nextUrl = normalizeSourceDocumentUrl(changeInfo.url);
+  if (previousUrl === nextUrl) {
+    updateCurrentPage(tab || { url: changeInfo.url });
+    return;
+  }
+
+  const token = workspaceTabController.revise();
+  currentTabUrl = changeInfo.url;
+  updateCurrentPage(tab || { url: changeInfo.url });
+  resetInMemoryWorkspace('Ready · page changed');
+  if (!Number.isInteger(token.tabId)) return;
+  workspaceStorageQueue = workspaceStorageQueue.catch(() => {}).then(() =>
+    getSessionStorage().remove(getWorkspaceCacheKey(token.tabId))
+  ).catch(error => {
+    if (workspaceTabController.isCurrent(token)) console.warn('Failed to invalidate navigated tab workspace:', error);
+  });
+  await workspaceStorageQueue;
+}
+
 function getSessionStorage() {
   if (!chrome.storage || !chrome.storage.session) {
     throw new Error('Session storage is unavailable');
@@ -440,6 +571,7 @@ function getSessionStorage() {
 
 function getWorkspaceSnapshot() {
   return {
+    sourceUrl: currentTabUrl,
     scrapedData,
     scrapedAt,
     activeResultTab,
@@ -481,7 +613,16 @@ async function saveWorkspaceForTab(token = workspaceTabController.current()) {
     const key = getWorkspaceCacheKey(token.tabId);
     const serialized = serializeWorkspace(token.tabId, getWorkspaceSnapshot());
     if (!workspaceTabController.isCurrent(token)) return;
-    await getSessionStorage().set({ [key]: serialized });
+    workspaceStorageQueue = workspaceStorageQueue.catch(() => {}).then(() => {
+      if (!workspaceTabController.isCurrent(token)) return false;
+      return setWorkspaceWithEviction(
+        getSessionStorage(),
+        key,
+        serialized,
+        () => workspaceTabController.isCurrent(token)
+      );
+    });
+    await workspaceStorageQueue;
     if (!workspaceTabController.isCurrent(token)) return;
   } catch (error) {
     if (!workspaceTabController.isCurrent(token)) return;
@@ -506,7 +647,7 @@ async function restoreWorkspaceForCurrentTab(token = workspaceTabController.curr
     const key = getWorkspaceCacheKey(token.tabId);
     const stored = await getSessionStorage().get(key);
     if (!workspaceTabController.isCurrent(token)) return;
-    const workspace = normalizeWorkspace(stored && stored[key], token.tabId);
+    const workspace = normalizeWorkspace(stored && stored[key], token.tabId, currentTabUrl);
     if (!workspace) return;
 
     scrapedData = workspace.scrapedData;
@@ -530,23 +671,24 @@ async function restoreWorkspaceForCurrentTab(token = workspaceTabController.curr
 }
 
 async function clearCurrentTabResults() {
-  cancelPendingWorkspaceSave();
-  const token = workspaceTabController.current();
+  const token = workspaceTabController.revise();
   resetInMemoryWorkspace();
   if (!workspaceTabController.isCurrent(token) || !Number.isInteger(token.tabId)) return;
 
-  try {
-    await getSessionStorage().remove(getWorkspaceCacheKey(token.tabId));
-  } catch (error) {
+  workspaceStorageQueue = workspaceStorageQueue.catch(() => {}).then(() =>
+    getSessionStorage().remove(getWorkspaceCacheKey(token.tabId))
+  ).catch(error => {
     if (!workspaceTabController.isCurrent(token)) return;
     console.warn('Failed to clear tab workspace:', error);
     elements.status.textContent = 'Results cleared · saved tab session could not be removed';
-  }
+  });
+  await workspaceStorageQueue;
 }
 
 // Setup event listeners
 function setupEventListeners() {
   chrome.tabs.onActivated.addListener(handleActiveTabChanged);
+  chrome.tabs.onUpdated.addListener(handleCurrentTabUpdated);
   elements.scrapeBtn.addEventListener('click', scrapePageData);
   elements.copyBtn.addEventListener('click', copyAllData);
   if (elements.clearResultsBtn) elements.clearResultsBtn.addEventListener('click', clearCurrentTabResults);
@@ -631,18 +773,19 @@ function switchTab(tabName, persist = true) {
 
 // Scrape page data
 async function scrapePageData() {
-  let operationToken = null;
+  let operationToken = workspaceTabController.revise();
   try {
     elements.scrapeBtn.disabled = true;
     elements.status.innerHTML = '<span class="spinner"></span> Scraping...';
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!workspaceTabController.isCurrent(operationToken)) return;
     if (!tab?.id) {
       throw new Error('No active tab');
     }
 
     if (currentTabId !== tab.id) {
-      operationToken = activateWorkspaceTab(tab.id);
+      operationToken = activateWorkspaceTab(tab.id, tab.windowId);
       resetInMemoryWorkspace();
       elements.scrapeBtn.disabled = true;
     } else {
@@ -662,7 +805,7 @@ async function scrapePageData() {
     if (!workspaceTabController.isCurrent(operationToken)) return;
 
     if (results && results[0] && results[0].result) {
-      scrapedData = copyScrapedData(results[0].result);
+      scrapedData = copyLiveScrapedData(results[0].result);
       scrapedAt = Date.now();
       const imageUrls = new Set(scrapedData.images.map(image => image.src));
       selectedImages = new Set([...selectedImages].filter(url => imageUrls.has(url)));

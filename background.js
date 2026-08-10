@@ -4,7 +4,7 @@
 const activeDownloads = new Map();
 
 const WORKSPACE_CACHE_VERSION = 1;
-const WORKSPACE_CACHE_PREFIX = `page-scraper-workspace:v${WORKSPACE_CACHE_VERSION}:tab:`;
+const WORKSPACE_CACHE_PREFIX = `scrape-session:v${WORKSPACE_CACHE_VERSION}:tab:`;
 
 chrome.tabs.onRemoved.addListener(tabId => {
   if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.storage || !chrome.storage.session) return;
