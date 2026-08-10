@@ -9,7 +9,7 @@ let settings = {
 };
 
 // Current filter state
-let currentImageFilter = 'all';
+let currentImageFilter = 'content';
 
 // Selection state
 let selectedImages = new Set();
@@ -66,6 +66,73 @@ function buildExportData(url, data) {
   };
 }
 
+function classifyImageCandidate(candidate) {
+  const value = candidate && typeof candidate === 'object' ? candidate : {};
+  const context = value.context && typeof value.context === 'object' ? value.context : {};
+  const stringValue = input => typeof input === 'string' ? input.toLowerCase() : '';
+  const numberValue = input => typeof input === 'number' && Number.isFinite(input) && input >= 0
+    ? input
+    : (typeof input === 'string' && input.trim() !== '' && Number.isFinite(Number(input)) && Number(input) >= 0 ? Number(input) : 0);
+  const flag = name => value[name] === true || context[name] === true;
+  const src = stringValue(value.src);
+  const alt = stringValue(value.alt);
+  const descriptor = `${src} ${alt}`;
+  const width = numberValue(value.width);
+  const height = numberValue(value.height);
+  const reasons = [];
+  let score = 0;
+
+  const add = (points, reason) => {
+    score += points;
+    reasons.push(reason);
+  };
+
+  if (flag('isFavicon') || /(?:^|[\/_.-])favicon(?:[\/_.-]|$)|apple-touch-icon|site-icon/.test(descriptor)) {
+    add(-10, 'favicon indicator');
+  }
+  if (flag('isLinkIcon')) add(-8, 'link icon indicator');
+  if (flag('isTracking') || /tracking|tracker|pixel(?:[\/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)) {
+    add(-10, 'tracking indicator');
+  }
+  if (flag('isSprite') || /(?:^|[\/_.-])sprites?(?:[\/_.-]|$)/.test(descriptor)) {
+    add(-10, 'sprite indicator');
+  }
+  if (/(?:^|[\s/_.-])(icon|logo|avatar)(?:[\s/_.-]|$)/.test(descriptor)) {
+    add(-5, 'icon, logo, or avatar indicator');
+  }
+
+  if (width > 0 && height > 0 && width <= 64 && height <= 64) {
+    add(-4, 'tiny dimensions');
+  } else if (width > 0 && height > 0 && Math.min(width, height) <= 80) {
+    add(-2, 'compact dimensions');
+  }
+
+  if (flag('inNav') || flag('inHeader') || flag('inFooter') || flag('inButton')) {
+    add(-4, 'navigation or control context');
+  }
+  if (width >= 300 && height >= 200) add(3, 'large dimensions');
+  if (width >= 600 && height >= 400) add(2, 'very large dimensions');
+  if (flag('inMain')) add(1, 'main content context');
+  if (flag('inArticle')) add(2, 'article context');
+  if (flag('inFigure')) add(2, 'figure context');
+  if (flag('inGallery')) add(3, 'gallery context');
+  if (flag('inProduct')) add(3, 'product context');
+  if (flag('inPicture')) add(1, 'picture context');
+
+  if (reasons.length === 0) reasons.push('no strong content signals');
+  const hasExplicitJunkIndicator = reasons.some(reason =>
+    reason === 'favicon indicator' ||
+    reason === 'link icon indicator' ||
+    reason === 'tracking indicator' ||
+    reason === 'sprite indicator'
+  );
+  return {
+    classification: !hasExplicitJunkIndicator && score >= 2 ? 'content' : 'junk',
+    score,
+    reasons
+  };
+}
+
 // Function that can be injected via scripting API
 function scrapePageFromContent() {
   const images = [];
@@ -88,9 +155,46 @@ function scrapePageFromContent() {
     // Skip overly large base64 data URIs
     if (src.startsWith('data:') && src.length > 50000) return;
     
+    const hasClosest = selector => {
+      try {
+        return typeof img.closest === 'function' && Boolean(img.closest(selector));
+      } catch (error) {
+        return false;
+      }
+    };
+    const context = {
+      inNav: hasClosest('nav, [role="navigation"], .nav, .navigation'),
+      inHeader: hasClosest('header, .header'),
+      inFooter: hasClosest('footer, .footer'),
+      inButton: hasClosest('button, [role="button"]'),
+      inMain: hasClosest('main, [role="main"]'),
+      inArticle: hasClosest('article'),
+      inFigure: hasClosest('figure'),
+      inGallery: hasClosest('.gallery, [class*="gallery"], [data-gallery]'),
+      inProduct: hasClosest('[class*="product"], [data-product], [itemtype*="Product"]'),
+      inPicture: hasClosest('picture')
+    };
+    const descriptor = `${src} ${alt} ${typeof img.className === 'string' ? img.className : ''} ${typeof img.id === 'string' ? img.id : ''}`.toLowerCase();
+    const candidate = {
+      src,
+      alt,
+      width,
+      height,
+      context,
+      isFavicon: /favicon|apple-touch-icon|site-icon/.test(descriptor),
+      isLinkIcon: hasClosest('a[rel~="icon"], link[rel~="icon"]'),
+      isSprite: /(?:^|[\s/_.-])sprites?(?:[\s/_.-]|$)/.test(descriptor),
+      isTracking: /tracking|tracker|pixel(?:[\s/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)
+    };
+    const classification = classifyImageCandidate(candidate);
     // Skip duplicates
     if (!images.some(i => i.src === src)) {
-      images.push({ src, alt, width, height });
+      images.push({
+        ...candidate,
+        classification: classification.classification,
+        classificationScore: classification.score,
+        classificationReasons: classification.reasons
+      });
     }
   });
   
@@ -320,9 +424,9 @@ function switchTab(tabName) {
   // Reset image filter when switching away from images tab
   if (tabName !== 'images' && elements.filterChips) {
     elements.filterChips.forEach(c => c.classList.remove('active'));
-    const allChip = document.querySelector('.filter-chip[data-filter="all"]');
-    if (allChip) allChip.classList.add('active');
-    currentImageFilter = 'all';
+    const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
+    if (contentChip) contentChip.classList.add('active');
+    currentImageFilter = 'content';
     if (elements.imageFilter) elements.imageFilter.value = '';
   }
   
@@ -407,6 +511,72 @@ function updateUI() {
 
 // Fallback scrape function for scripting API
 function scrapePageFromContentFallback(scrapeSettings) {
+  const classifyImageCandidate = candidate => {
+    const value = candidate && typeof candidate === 'object' ? candidate : {};
+    const context = value.context && typeof value.context === 'object' ? value.context : {};
+    const stringValue = input => typeof input === 'string' ? input.toLowerCase() : '';
+    const numberValue = input => typeof input === 'number' && Number.isFinite(input) && input >= 0
+      ? input
+      : (typeof input === 'string' && input.trim() !== '' && Number.isFinite(Number(input)) && Number(input) >= 0 ? Number(input) : 0);
+    const flag = name => value[name] === true || context[name] === true;
+    const src = stringValue(value.src);
+    const alt = stringValue(value.alt);
+    const descriptor = `${src} ${alt}`;
+    const width = numberValue(value.width);
+    const height = numberValue(value.height);
+    const reasons = [];
+    let score = 0;
+
+    const add = (points, reason) => {
+      score += points;
+      reasons.push(reason);
+    };
+
+    if (flag('isFavicon') || /(?:^|[\/_.-])favicon(?:[\/_.-]|$)|apple-touch-icon|site-icon/.test(descriptor)) {
+      add(-10, 'favicon indicator');
+    }
+    if (flag('isLinkIcon')) add(-8, 'link icon indicator');
+    if (flag('isTracking') || /tracking|tracker|pixel(?:[\/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)) {
+      add(-10, 'tracking indicator');
+    }
+    if (flag('isSprite') || /(?:^|[\/_.-])sprites?(?:[\/_.-]|$)/.test(descriptor)) {
+      add(-10, 'sprite indicator');
+    }
+    if (/(?:^|[\s/_.-])(icon|logo|avatar)(?:[\s/_.-]|$)/.test(descriptor)) {
+      add(-5, 'icon, logo, or avatar indicator');
+    }
+
+    if (width > 0 && height > 0 && width <= 64 && height <= 64) {
+      add(-4, 'tiny dimensions');
+    } else if (width > 0 && height > 0 && Math.min(width, height) <= 80) {
+      add(-2, 'compact dimensions');
+    }
+
+    if (flag('inNav') || flag('inHeader') || flag('inFooter') || flag('inButton')) {
+      add(-4, 'navigation or control context');
+    }
+    if (width >= 300 && height >= 200) add(3, 'large dimensions');
+    if (width >= 600 && height >= 400) add(2, 'very large dimensions');
+    if (flag('inMain')) add(1, 'main content context');
+    if (flag('inArticle')) add(2, 'article context');
+    if (flag('inFigure')) add(2, 'figure context');
+    if (flag('inGallery')) add(3, 'gallery context');
+    if (flag('inProduct')) add(3, 'product context');
+    if (flag('inPicture')) add(1, 'picture context');
+
+    if (reasons.length === 0) reasons.push('no strong content signals');
+    const hasExplicitJunkIndicator = reasons.some(reason =>
+      reason === 'favicon indicator' ||
+      reason === 'link icon indicator' ||
+      reason === 'tracking indicator' ||
+      reason === 'sprite indicator'
+    );
+    return {
+      classification: !hasExplicitJunkIndicator && score >= 2 ? 'content' : 'junk',
+      score,
+      reasons
+    };
+  };
   const defaults = {
     minSize: false,
     minWidth: 100,
@@ -446,8 +616,45 @@ function scrapePageFromContentFallback(scrapeSettings) {
     if (normalizedSettings.minSize && (width < normalizedSettings.minWidth || height < normalizedSettings.minHeight)) return;
     if (src.startsWith('data:') && src.length > 50000) return;
     
+    const hasClosest = selector => {
+      try {
+        return typeof img.closest === 'function' && Boolean(img.closest(selector));
+      } catch (error) {
+        return false;
+      }
+    };
+    const context = {
+      inNav: hasClosest('nav, [role="navigation"], .nav, .navigation'),
+      inHeader: hasClosest('header, .header'),
+      inFooter: hasClosest('footer, .footer'),
+      inButton: hasClosest('button, [role="button"]'),
+      inMain: hasClosest('main, [role="main"]'),
+      inArticle: hasClosest('article'),
+      inFigure: hasClosest('figure'),
+      inGallery: hasClosest('.gallery, [class*="gallery"], [data-gallery]'),
+      inProduct: hasClosest('[class*="product"], [data-product], [itemtype*="Product"]'),
+      inPicture: hasClosest('picture')
+    };
+    const descriptor = `${src} ${alt} ${typeof img.className === 'string' ? img.className : ''} ${typeof img.id === 'string' ? img.id : ''}`.toLowerCase();
+    const candidate = {
+      src,
+      alt,
+      width,
+      height,
+      context,
+      isFavicon: /favicon|apple-touch-icon|site-icon/.test(descriptor),
+      isLinkIcon: hasClosest('a[rel~="icon"], link[rel~="icon"]'),
+      isSprite: /(?:^|[\s/_.-])sprites?(?:[\s/_.-]|$)/.test(descriptor),
+      isTracking: /tracking|tracker|pixel(?:[\s/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)
+    };
+    const classification = classifyImageCandidate(candidate);
     if (!images.some(i => i.src === src)) {
-      images.push({ src, alt, width, height });
+      images.push({
+        ...candidate,
+        classification: classification.classification,
+        classificationScore: classification.score,
+        classificationReasons: classification.reasons
+      });
     }
   });
   
@@ -545,8 +752,15 @@ function renderImages() {
   const textFilter = elements.imageFilter ? elements.imageFilter.value.toLowerCase() : '';
   let images = scrapedData.images;
   
-  // Apply size filter based on currentImageFilter
-  if (currentImageFilter === 'large') {
+  // Apply classification or size filter based on currentImageFilter
+  if (currentImageFilter === 'content') {
+    images = images.filter(img => {
+      if (img && (img.classification === 'content' || img.classification === 'junk')) {
+        return img.classification === 'content';
+      }
+      return classifyImageCandidate(img).classification === 'content';
+    });
+  } else if (currentImageFilter === 'large') {
     images = images.filter(img => img.width >= 200 && img.height >= 200);
   } else if (currentImageFilter === 'xlarge') {
     images = images.filter(img => img.width >= 500 && img.height >= 500);
@@ -573,14 +787,17 @@ function renderImages() {
   
   // Apply text filter if provided
   if (textFilter) {
-    images = images.filter(img => 
-      (img.alt && img.alt.toLowerCase().includes(textFilter)) || 
-      img.src.toLowerCase().includes(textFilter)
-    );
+    images = images.filter(img => {
+      const alt = img && typeof img.alt === 'string' ? img.alt.toLowerCase() : '';
+      const src = img && typeof img.src === 'string' ? img.src.toLowerCase() : '';
+      return alt.includes(textFilter) || src.includes(textFilter);
+    });
   }
-  
-  elements.imagesCount.textContent = `${scrapedData.images.length} images found`;
-  
+
+  elements.imagesCount.textContent = images.length === scrapedData.images.length
+    ? `${images.length} images found`
+    : `${images.length} of ${scrapedData.images.length} images shown`;
+
   if (images.length === 0) {
     elements.imagesContainer.innerHTML = `
       <div class="empty-state">

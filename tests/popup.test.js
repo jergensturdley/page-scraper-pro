@@ -7,6 +7,7 @@ const vm = require('vm');
 
 const stylesPath = path.join(__dirname, '..', 'styles.css');
 const popupJsPath = path.join(__dirname, '..', 'popup.js');
+const popupHtmlPath = path.join(__dirname, '..', 'popup.html');
 const backgroundJsPath = path.join(__dirname, '..', 'background.js');
 const manifestPath = path.join(__dirname, '..', 'manifest.json');
 
@@ -17,7 +18,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate };`, context);
   return context.popupHelpers;
 }
 
@@ -258,6 +259,66 @@ describe('Rendered video security and controls', () => {
 
 });
 
+describe('Image content classification', () => {
+  test.each([
+    [{ src: 'https://example.com/favicon.ico', width: 32, height: 32, isFavicon: true }, 'favicon'],
+    [{ src: 'https://example.com/icon.png', width: 48, height: 48, isLinkIcon: true }, 'link icon'],
+    [{ src: 'https://example.com/pixel.gif', width: 1, height: 1, isTracking: true }, 'tracking'],
+    [{ src: 'https://example.com/sprites.png', width: 512, height: 512, isSprite: true }, 'sprite']
+  ])('rejects obvious non-content assets %#', (candidate, reason) => {
+    const { classifyImageCandidate } = loadPopupHelpers();
+    const result = classifyImageCandidate(candidate);
+
+    expect(result.classification).toBe('junk');
+    expect(Number.isFinite(result.score)).toBe(true);
+    expect(result.reasons.join(' ')).toContain(reason);
+  });
+
+  test.each([
+    { src: 'https://example.com/icon-home.png', alt: 'Home icon', width: 40, height: 40 },
+    { src: 'https://example.com/brand-logo.png', alt: 'Brand logo', width: 180, height: 60 },
+    { src: 'https://example.com/avatar.jpg', alt: 'User avatar', width: 96, height: 96 },
+    { src: 'https://example.com/nav-item.jpg', width: 240, height: 120, inNav: true }
+  ])('classifies small icon, logo, avatar, and navigation candidates as junk', (candidate) => {
+    expect(loadPopupHelpers().classifyImageCandidate(candidate).classification).toBe('junk');
+  });
+
+  test.each([
+    { src: 'https://example.com/story.jpg', width: 900, height: 600, inMain: true, inArticle: true },
+    { src: 'https://example.com/figure.jpg', width: 640, height: 480, inFigure: true, inPicture: true },
+    { src: 'https://example.com/gallery/1.jpg', width: 500, height: 500, inGallery: true },
+    { src: 'https://example.com/products/shoe.jpg', width: 800, height: 800, inProduct: true }
+  ])('keeps large editorial, gallery, and product imagery', (candidate) => {
+    const result = loadPopupHelpers().classifyImageCandidate(candidate);
+    expect(result.classification).toBe('content');
+    expect(result.score).toBeGreaterThanOrEqual(2);
+    expect(result.reasons.length).toBeGreaterThan(0);
+  });
+
+  test('returns an explainable deterministic result for uncertain and malformed candidates', () => {
+    const { classifyImageCandidate } = loadPopupHelpers();
+    expect(() => classifyImageCandidate(null)).not.toThrow();
+    expect(classifyImageCandidate(null)).toEqual(classifyImageCandidate(null));
+    expect(classifyImageCandidate({ src: {}, alt: [], width: 'bad', height: Infinity })).toEqual(
+      expect.objectContaining({ classification: expect.stringMatching(/^(content|junk)$/), score: expect.any(Number) })
+    );
+    expect(classifyImageCandidate({ src: 'https://example.com/photo.jpg', width: 150, height: 150 }).reasons.length).toBeGreaterThan(0);
+  });
+
+  test('ships Content as the active default with an All assets escape hatch', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+
+    expect(html).toMatch(/class="filter-chip active" data-filter="content"[^>]*>Content<\/button>/);
+    expect(html).toMatch(/class="filter-chip" data-filter="all"[^>]*>All assets<\/button>/);
+    expect(html).toContain('data-filter="large"');
+    expect(html).toContain('data-filter="xlarge"');
+    expect(html).toContain('data-filter="domain"');
+    expect(source).toContain("let currentImageFilter = 'content';");
+    expect(source).toContain(".filter-chip[data-filter=\"content\"]");
+  });
+});
+
 describe('Scraper settings injection', () => {
   function loadFallbackScraper(document) {
     const popupJs = fs.readFileSync(popupJsPath, 'utf8');
@@ -352,6 +413,28 @@ describe('Scraper settings injection', () => {
     expect(scrape({ minSize: true, minWidth, minHeight: 100 }).images.map(({ src }) => src)).toEqual([
       'https://example.com/at-default.png'
     ]);
+  });
+
+  test('attaches classification and captured DOM context without dropping heuristic junk', () => {
+    const navLogo = image('https://example.com/logo.png', 120, 40);
+    navLogo.alt = 'Site logo';
+    navLogo.closest = (selector) => selector.includes('nav') ? {} : null;
+    const articleImage = image('https://example.com/article.jpg', 900, 600);
+    articleImage.closest = (selector) => selector.includes('article') || selector.includes('main') ? {} : null;
+    const scrape = loadFallbackScraper(createDocument({ images: [navLogo, articleImage] }));
+
+    const result = scrape({ minSize: false }).images;
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual(expect.objectContaining({
+      classification: 'junk',
+      classificationScore: expect.any(Number),
+      classificationReasons: expect.arrayContaining([expect.any(String)]),
+      context: expect.objectContaining({ inNav: true })
+    }));
+    expect(result[1]).toEqual(expect.objectContaining({
+      classification: 'content',
+      context: expect.objectContaining({ inMain: true, inArticle: true })
+    }));
   });
 
   test('excludes only navigation links when excludeNav is enabled', () => {
