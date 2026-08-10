@@ -76,28 +76,38 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 async function copyTextInTab(tabId, text) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, {
-      action: 'copyToClipboard',
-      text
-    }, response => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message || 'No content script is available on this page'));
-        return;
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    throw new Error('No accessible tab is available for the clipboard write');
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (value) => {
+      try {
+        await navigator.clipboard.writeText(value);
+        return { success: true };
+      } catch (error) {
+        return {
+          success: false,
+          error: error && error.message ? error.message : 'Clipboard write failed'
+        };
       }
-      if (!response || response.success !== true) {
-        reject(new Error(response && response.error ? response.error : 'The page did not confirm the clipboard write'));
-        return;
-      }
-      resolve(response);
-    });
+    },
+    args: [String(text ?? '')]
   });
+  const result = results && results[0] && results[0].result;
+  if (!result || result.success !== true) {
+    throw new Error(result && result.error ? result.error : 'The page did not confirm the clipboard write');
+  }
+  return result;
 }
 
 // Scrape and display results
 async function scrapeAndShow(tab, type) {
   try {
+    if (!tab || !Number.isInteger(tab.id) || tab.id <= 0) {
+      throw new Error('No accessible tab is available for scraping');
+    }
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
@@ -128,16 +138,17 @@ async function scrapeAndShow(tab, type) {
       }
     });
     
-    if (results && results[0]) {
-      const data = results[0].result;
-      const content = type === 'images' 
-        ? data.images.map(img => img.src).join('\n')
-        : data.links.map(link => link.href).join('\n');
-      
-      // Confirm the content script completed the clipboard write before reporting success.
-      await copyTextInTab(tab.id, content);
-      showNotification(`${type === 'images' ? 'Images' : 'Links'} copied to clipboard!`);
+    const data = results && results[0] && results[0].result;
+    if (!data || !Array.isArray(data.images) || !Array.isArray(data.links)) {
+      throw new Error('The page did not return scrape results');
     }
+    const content = type === 'images'
+      ? data.images.map(img => img.src).join('\n')
+      : data.links.map(link => link.href).join('\n');
+
+    // Confirm the page completed the clipboard write before reporting success.
+    await copyTextInTab(tab.id, content);
+    showNotification(`${type === 'images' ? 'Images' : 'Links'} copied to clipboard!`);
   } catch (error) {
     console.error('Scraping error:', error);
     showNotification(`Could not scrape or copy page data: ${error.message || 'Unknown error'}`);
@@ -211,7 +222,7 @@ async function downloadFiles(items) {
   return results;
 }
 
-// Listen for messages from popup or content script
+// Listen for messages from the popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'showNotification') {
     showNotification(request.message);
@@ -510,25 +521,20 @@ async function createZipFromUrls(urls, names) {
   console.log('createZipFromUrls streaming:', urls.length);
   showNotification(`Fetching ${urls.length} images and streaming ZIP...`);
 
-  // Try to load fflate via CDN if not present
+  // Load ZIP support only from the library packaged with the extension.
   if (typeof fflate === 'undefined') {
     try {
       importScripts(chrome.runtime.getURL('libs/fflate.umd.js'));
       console.log('fflate loaded from extension libs');
-    } catch (e) {
-      try {
-        importScripts('https://cdn.jsdelivr.net/npm/fflate@0.8.3/umd/index.js');
-        console.log('fflate loaded from CDN');
-      } catch (err) {
-        console.warn('Failed to import fflate, falling back to batch download', e, err);
-        for (let i = 0; i < urls.length; i++) {
-          const url = urls[i];
-          const filename = (names[i] || `image-${i + 1}`).replace(/[^a-z0-9._-]/gi, '_') + '.jpg';
-          chrome.downloads.download({ url, filename, saveAs: false });
-          await new Promise(r => setTimeout(r, 150));
-        }
-        return;
-      }
+    } catch (error) {
+      console.error('Packaged ZIP support is unavailable; downloading files individually.', error);
+      showNotification('Packaged ZIP support is unavailable. Downloading files individually.');
+      await downloadFiles(urls.map((url, index) => ({
+        url,
+        filename: names[index] || `image-${index + 1}`,
+        defaultExtension: '.jpg'
+      })));
+      return;
     }
   }
 

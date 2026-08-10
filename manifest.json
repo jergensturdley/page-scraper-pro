@@ -15,13 +15,6 @@
   "side_panel": {
     "default_path": "popup.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "css": ["content.css"],
-      "run_at": "document_idle"
-  }],
   "background": {
     "service_worker": "background.js"
   },
@@ -33,8 +26,5 @@
     "downloads",
     "notifications",
     "sidePanel"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ]
 }

@@ -913,20 +913,23 @@ this.createToastController = createToastController;`, context);
     expect(resetFunction).toContain('toastController.reset();');
   });
 
-  test('content clipboard listener reports asynchronous success and failure', () => {
-    const contentJs = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
-    const listener = contentJs.slice(contentJs.indexOf('chrome.runtime.onMessage.addListener'));
-    expect(listener).toContain('await navigator.clipboard.writeText(request.text);');
-    expect(listener).toContain('sendResponse({ success: true });');
-    expect(listener).toMatch(/sendResponse\(\{ success: false, error:/);
-    expect(listener).toContain('return true;');
+  test('context clipboard execution reports asynchronous success and failure', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    const copySource = backgroundJs.slice(
+      backgroundJs.indexOf('async function copyTextInTab'),
+      backgroundJs.indexOf('// Scrape and display results')
+    );
+    expect(copySource).toContain('await navigator.clipboard.writeText(value);');
+    expect(copySource).toContain('return { success: true };');
+    expect(copySource).toMatch(/success: false,[\s\S]*error:/);
+    expect(copySource).toContain('chrome.scripting.executeScript');
   });
 
-  test('background only announces clipboard success after a confirmed response', () => {
+  test('background only announces clipboard success after a confirmed result', () => {
     const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
     expect(backgroundJs).toContain('async function copyTextInTab(tabId, text)');
-    expect(backgroundJs).toContain('chrome.runtime.lastError');
-    expect(backgroundJs).toContain("if (!response || response.success !== true)");
+    expect(backgroundJs).toContain('const result = results && results[0] && results[0].result;');
+    expect(backgroundJs).toContain("if (!result || result.success !== true)");
     expect(backgroundJs).toContain("showNotification('Could not copy to clipboard:");
     expect(backgroundJs).toContain('await copyTextInTab(');
   });
@@ -1266,5 +1269,54 @@ describe('Responsive dark Operate interface contracts', () => {
     expect(getEmptyResultsMessage('images', 0, 0)).toBe('No images found');
     expect(getEmptyResultsMessage('images', 0, 4)).toBe('No images match the current filters');
     expect(getEmptyResultsMessage('links', 0, 3)).toBe('No links match the current filter');
+  });
+});
+
+
+describe('Least-privilege extension packaging', () => {
+  test('uses activeTab without declarative page access', () => {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    expect(manifest.permissions).toEqual(expect.arrayContaining(['activeTab', 'scripting', 'storage']));
+    expect(manifest.content_scripts).toBeUndefined();
+    expect(manifest.host_permissions || []).not.toContain('<all_urls>');
+  });
+
+  test('context-menu clipboard support is repeat-safe direct execution without listeners', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    const copyStart = backgroundJs.indexOf('async function copyTextInTab');
+    const copyEnd = backgroundJs.indexOf('// Scrape and display results', copyStart);
+    const copySource = backgroundJs.slice(copyStart, copyEnd);
+
+    expect(copyStart).toBeGreaterThan(-1);
+    expect(copySource).toContain('chrome.scripting.executeScript');
+    expect(copySource).toContain('navigator.clipboard.writeText');
+    expect(copySource).toContain('result.success !== true');
+    expect(copySource).not.toContain('chrome.tabs.sendMessage');
+    expect(copySource).not.toContain('onMessage.addListener');
+  });
+
+  test('context scraping rejects missing tabs and empty injection results', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    const scrapeStart = backgroundJs.indexOf('async function scrapeAndShow');
+    const scrapeEnd = backgroundJs.indexOf('// Show notification', scrapeStart);
+    const scrapeSource = backgroundJs.slice(scrapeStart, scrapeEnd);
+
+    expect(scrapeSource).toContain("throw new Error('No accessible tab is available for scraping')");
+    expect(scrapeSource).toContain("throw new Error('The page did not return scrape results')");
+  });
+
+  test('does not package unsolicited page overlays or orphaned content styles', () => {
+    expect(fs.existsSync(path.join(__dirname, '..', 'content.js'))).toBe(false);
+    expect(fs.existsSync(path.join(__dirname, '..', 'content.css'))).toBe(false);
+  });
+
+  test('loads ZIP support only from the packaged extension library', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+
+    expect(backgroundJs).toContain("importScripts(chrome.runtime.getURL('libs/fflate.umd.js'))");
+    expect(backgroundJs).not.toMatch(/importScripts\(\s*['"]https?:\/\//);
+    expect(backgroundJs).not.toContain('cdn.jsdelivr.net');
+    expect(backgroundJs).toContain('Packaged ZIP support is unavailable');
   });
 });
