@@ -135,7 +135,7 @@
         </div>
 
         <div class="selection-toolbar" id="selectionToolbar">
-          <span class="selection-info" id="selectionInfo">0 selected</span>
+          <span class="selection-info" id="selectionInfo" role="status" aria-live="polite" aria-atomic="true">0 selected</span>
           <div class="selection-actions">
             <button class="select-all-btn" id="selectAllBtn">Select All</button>
             <button class="download-selected-btn" id="openPanelBtn">Download</button>
@@ -145,7 +145,7 @@
         <div class="tab-content">
           <div class="tab-pane active" id="imagesTab" role="tabpanel" aria-labelledby="imagesTabButton">
             <div class="results-header">
-              <span class="results-count" id="imagesCount">0 images</span>
+              <span class="results-count" id="imagesCount" role="status" aria-live="polite" aria-atomic="true">0 images</span>
               <div class="filter-row">
                 <input type="text" id="imageFilter" aria-label="Filter images" placeholder="Filter..." class="filter-input">
                 <button class="copy-tab-btn" data-type="images" aria-label="Copy all image URLs" title="Copy all image URLs">
@@ -213,7 +213,7 @@
 
           <div class="tab-pane" id="linksTab" role="tabpanel" aria-labelledby="linksTabButton" hidden>
             <div class="results-header">
-              <span class="results-count" id="linksCount">0 links</span>
+              <span class="results-count" id="linksCount" role="status" aria-live="polite" aria-atomic="true">0 links</span>
               <div class="filter-row">
                 <input type="text" id="linkFilter" aria-label="Filter links" placeholder="Filter..." class="filter-input">
                 <button class="copy-tab-btn" data-type="links" aria-label="Copy all links" title="Copy all links">
@@ -265,12 +265,12 @@
     <footer class="footer">
       <div class="status" id="status" role="status" aria-live="polite" aria-atomic="true">Ready</div>
       <div class="export-buttons">
-        <button class="btn-small" id="exportJson" title="Export JSON">JSON</button>
-        <button class="btn-small" id="exportImages" title="Download images">IMG</button>
-        <button class="btn-small" id="exportVideos" title="Download videos">VID</button>
-        <button class="btn-small" id="exportAudios" title="Download audio">AUD</button>
-        <button class="btn-small" id="exportArchive" title="Export ZIP">ZIP</button>
-        <button class="btn-small" id="copyImageUrls" title="Copy URLs">URL</button>
+        <button class="btn-small" id="exportJson" aria-label="Export results as JSON" title="Export JSON">JSON</button>
+        <button class="btn-small" id="exportImages" aria-label="Download images" title="Download images">IMG</button>
+        <button class="btn-small" id="exportVideos" aria-label="Download videos" title="Download videos">VID</button>
+        <button class="btn-small" id="exportAudios" aria-label="Download audio" title="Download audio">AUD</button>
+        <button class="btn-small" id="exportArchive" aria-label="Download images as ZIP" title="Export ZIP">ZIP</button>
+        <button class="btn-small" id="copyImageUrls" aria-label="Copy image URLs" title="Copy URLs">URL</button>
       </div>
     </footer>
   </div>

@@ -1416,7 +1416,9 @@ function renderImages() {
     });
   }
 
-  elements.imagesCount.textContent = formatFilteredCount(images.length, scrapedData.images.length, 'images');
+  elements.imagesCount.textContent =
+    getEmptyResultsMessage('images', images.length, scrapedData.images.length) ||
+    formatFilteredCount(images.length, scrapedData.images.length, 'images');
 
   if (images.length === 0) {
     elements.imagesContainer.innerHTML = `
@@ -1496,7 +1498,9 @@ function renderLinks() {
     );
   }
   
-  elements.linksCount.textContent = formatFilteredCount(links.length, scrapedData.links.length, 'links');
+  elements.linksCount.textContent =
+    getEmptyResultsMessage('links', links.length, scrapedData.links.length) ||
+    formatFilteredCount(links.length, scrapedData.links.length, 'links');
   
   if (links.length === 0) {
     elements.linksContainer.innerHTML = `

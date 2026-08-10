@@ -1424,6 +1424,49 @@ describe('Responsive dark Operate interface contracts', () => {
 });
 
 
+describe('Accessible result feedback and export actions', () => {
+  test('announces concise image, link, and selection changes without live result grids', () => {
+    const popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+
+    ['imagesCount', 'linksCount', 'selectionInfo'].forEach((id) => {
+      expect(popupHtml).toMatch(new RegExp(
+        `<[^>]+id=["']${id}["'][^>]+role=["']status["'][^>]+aria-live=["']polite["'][^>]+aria-atomic=["']true["']`
+      ));
+    });
+    ['imagesContainer', 'linksContainer'].forEach((id) => {
+      const element = popupHtml.match(new RegExp(`<[^>]+id=["']${id}["'][^>]*>`));
+      expect(element).not.toBeNull();
+      expect(element[0]).not.toMatch(/role=["']status["']|aria-live=/);
+    });
+  });
+
+  test('puts image and link empty feedback in their concise announced status nodes', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+
+    expect(popupJs).toContain("getEmptyResultsMessage('images', images.length, scrapedData.images.length) ||");
+    expect(popupJs).toContain("getEmptyResultsMessage('links', links.length, scrapedData.links.length) ||");
+  });
+
+  test('gives every compact footer export control an action-oriented accessible name', () => {
+    const popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+    const expectedLabels = {
+      exportJson: 'Export results as JSON',
+      exportImages: 'Download images',
+      exportVideos: 'Download videos',
+      exportAudios: 'Download audio',
+      exportArchive: 'Download images as ZIP',
+      copyImageUrls: 'Copy image URLs'
+    };
+
+    Object.entries(expectedLabels).forEach(([id, label]) => {
+      expect(popupHtml).toMatch(new RegExp(
+        `<button[^>]+id=["']${id}["'][^>]+aria-label=["']${label}["']`
+      ));
+    });
+  });
+});
+
+
 describe('Least-privilege extension packaging', () => {
   test('uses activeTab without declarative page access', () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
