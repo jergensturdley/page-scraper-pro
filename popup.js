@@ -90,11 +90,14 @@ function classifyImageCandidate(candidate) {
     reasons.push(reason);
   };
 
-  if (flag('isFavicon') || /(?:^|[\/_.-])favicon(?:[\/_.-]|$)|apple-touch-icon|site-icon/.test(descriptor)) {
+  const tinyAsset = width > 0 && height > 0 && width <= 64 && height <= 64;
+  const hasFaviconName = /(?:^|[\s/_.-])(favicon|apple-touch-icon|site-icon)(?:[\s/_.-]|$)/.test(descriptor);
+  const hasTrackingName = /(?:^|[\s/_.-])(tracking(?:[-_.]pixel)?|tracker(?:[-_.]pixel)?|pixel|spacer|1x1)(?:[\s/_.-]|$)|clear\.gif/.test(descriptor);
+  if (flag('isFavicon') || (tinyAsset && hasFaviconName)) {
     add(-10, 'favicon indicator');
   }
   if (flag('isLinkIcon')) add(-8, 'link icon indicator');
-  if (flag('isTracking') || /tracking|tracker|pixel(?:[\/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)) {
+  if (flag('isTracking') || (tinyAsset && hasTrackingName)) {
     add(-10, 'tracking indicator');
   }
   if (flag('isSprite') || /(?:^|[\/_.-])sprites?(?:[\/_.-]|$)/.test(descriptor)) {
@@ -141,161 +144,6 @@ function classifyImageCandidate(candidate) {
     score,
     reasons
   };
-}
-
-// Function that can be injected via scripting API
-function scrapePageFromContent() {
-  const images = [];
-  const videos = [];
-  const audios = [];
-  const links = [];
-  
-  // Scrape images - comprehensive selection
-  document.querySelectorAll('img[src], img[data-src], img[data-lazy], picture img').forEach(img => {
-    let src = img.src || img.dataset.src || img.dataset.lazy || img.dataset.original;
-    if (!src) return;
-    
-    const alt = img.alt || img.title || '';
-    const width = img.naturalWidth || img.width || 0;
-    const height = img.naturalHeight || img.height || 0;
-    
-    // Skip very small images
-    if (width < 10 || height < 10) return;
-    
-    // Skip overly large base64 data URIs
-    if (src.startsWith('data:') && src.length > 50000) return;
-    
-    const hasClosest = selector => {
-      try {
-        return typeof img.closest === 'function' && Boolean(img.closest(selector));
-      } catch (error) {
-        return false;
-      }
-    };
-    const context = {
-      inNav: hasClosest('nav, [role="navigation"], .nav, .navigation'),
-      inHeader: hasClosest('header, .header'),
-      inFooter: hasClosest('footer, .footer'),
-      inButton: hasClosest('button, [role="button"]'),
-      inMain: hasClosest('main, [role="main"]'),
-      inArticle: hasClosest('article'),
-      inFigure: hasClosest('figure'),
-      inGallery: hasClosest('.gallery, [class*="gallery"], [data-gallery]'),
-      inProduct: hasClosest('[class*="product"], [data-product], [itemtype*="Product"]'),
-      inPicture: hasClosest('picture')
-    };
-    const descriptor = `${src} ${alt} ${typeof img.className === 'string' ? img.className : ''} ${typeof img.id === 'string' ? img.id : ''}`.toLowerCase();
-    const candidate = {
-      src,
-      alt,
-      width,
-      height,
-      context,
-      isFavicon: /favicon|apple-touch-icon|site-icon/.test(descriptor),
-      isLinkIcon: hasClosest('a[rel~="icon"], link[rel~="icon"]'),
-      isSprite: /(?:^|[\s/_.-])sprites?(?:[\s/_.-]|$)/.test(descriptor),
-      isTracking: /tracking|tracker|pixel(?:[\s/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)
-    };
-    const classification = classifyImageCandidate(candidate);
-    // Skip duplicates
-    if (!images.some(i => i.src === src)) {
-      images.push({
-        ...candidate,
-        classification: classification.classification,
-        classificationScore: classification.score,
-        classificationReasons: classification.reasons
-      });
-    }
-  });
-  
-  // Scrape videos - comprehensive selection
-  const videoElements = document.querySelectorAll('video, source[src$=".mp4"], source[src$=".webm"], source[src$=".ogg"], source[src$=".mov"], iframe[src*="youtube"], iframe[src*="vimeo"], iframe[src*="dailymotion"], video source');
-  
-  videoElements.forEach(video => {
-    let src = '';
-    let type = '';
-    let width = 0;
-    let height = 0;
-    let poster = '';
-    
-    if (video.tagName === 'VIDEO') {
-      src = video.src || video.querySelector('source')?.src || '';
-      width = video.videoWidth || video.width || video.getAttribute('width') || 0;
-      height = video.videoHeight || video.height || video.getAttribute('height') || 0;
-      poster = video.poster || '';
-      type = 'video';
-    } else if (video.tagName === 'SOURCE') {
-      src = video.src;
-      const parentVideo = video.closest('video');
-      if (parentVideo) {
-        width = parentVideo.videoWidth || parentVideo.width || 0;
-        height = parentVideo.videoHeight || parentVideo.height || 0;
-        poster = parentVideo.poster || '';
-      }
-      type = 'video';
-    } else if (video.tagName === 'IFRAME') {
-      src = video.src;
-      width = video.width || video.getAttribute('width') || 0;
-      height = video.height || video.getAttribute('height') || 0;
-      type = 'embed';
-    }
-    
-    if (!src) return;
-    
-    if (!videos.some(v => v.src === src)) {
-      videos.push({ src, type, width, height, poster });
-    }
-  });
-  
-  // Scrape audio
-  document.querySelectorAll('audio, audio source, source[src$=".mp3"], source[src$=".wav"], source[src$=".ogg"], source[src$=".flac"], source[src$=".aac"], source[src$=".m4a"], source[src$=".opus"], source[src$=".wma"]').forEach(el => {
-    let src = '';
-    let type = 'audio';
-
-    if (el.tagName === 'AUDIO') {
-      src = el.src || el.querySelector('source')?.src || '';
-    } else if (el.tagName === 'SOURCE') {
-      src = el.src;
-    }
-
-    if (!src) return;
-
-    if (!audios.some(a => a.src === src)) {
-      audios.push({ src, type });
-    }
-  });
-
-  document.querySelectorAll('a[href$=".mp3"], a[href$=".wav"], a[href$=".ogg"], a[href$=".flac"], a[href$=".aac"], a[href$=".m4a"], a[href$=".opus"]').forEach(link => {
-    const src = link.href;
-    if (!audios.some(a => a.src === src)) {
-      audios.push({ src, type: 'link' });
-    }
-  });
-
-  // Scrape links
-  document.querySelectorAll('a[href]').forEach(link => {
-    const href = link.href;
-    const text = link.innerText.trim();
-    
-    if (!href || href.startsWith('javascript:') || href.startsWith('#')) return;
-    if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
-    
-    if (!links.some(l => l.href === href)) {
-      links.push({ href, text });
-    }
-  });
-  
-  // Scrape text
-  const bodyClone = document.body.cloneNode(true);
-  const unwanted = bodyClone.querySelectorAll('script, style, nav, header, footer, aside, .nav, .header, .footer, .sidebar, [role="navigation"]');
-  unwanted.forEach(el => el.remove());
-  
-  const text = (bodyClone.innerText || bodyClone.textContent || '')
-    .replace(/\s+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  
-  return { images, videos, audios, links, text };
 }
 
 // DOM Elements
@@ -545,11 +393,14 @@ function scrapePageFromContentFallback(scrapeSettings) {
       reasons.push(reason);
     };
 
-    if (flag('isFavicon') || /(?:^|[\/_.-])favicon(?:[\/_.-]|$)|apple-touch-icon|site-icon/.test(descriptor)) {
+    const tinyAsset = width > 0 && height > 0 && width <= 64 && height <= 64;
+    const hasFaviconName = /(?:^|[\s/_.-])(favicon|apple-touch-icon|site-icon)(?:[\s/_.-]|$)/.test(descriptor);
+    const hasTrackingName = /(?:^|[\s/_.-])(tracking(?:[-_.]pixel)?|tracker(?:[-_.]pixel)?|pixel|spacer|1x1)(?:[\s/_.-]|$)|clear\.gif/.test(descriptor);
+    if (flag('isFavicon') || (tinyAsset && hasFaviconName)) {
       add(-10, 'favicon indicator');
     }
     if (flag('isLinkIcon')) add(-8, 'link icon indicator');
-    if (flag('isTracking') || /tracking|tracker|pixel(?:[\/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)) {
+    if (flag('isTracking') || (tinyAsset && hasTrackingName)) {
       add(-10, 'tracking indicator');
     }
     if (flag('isSprite') || /(?:^|[\/_.-])sprites?(?:[\/_.-]|$)/.test(descriptor)) {
@@ -662,10 +513,10 @@ function scrapePageFromContentFallback(scrapeSettings) {
       width,
       height,
       context,
-      isFavicon: /favicon|apple-touch-icon|site-icon/.test(descriptor),
+      isFavicon: width <= 64 && height <= 64 && /(?:^|[\s/_.-])(favicon|apple-touch-icon|site-icon)(?:[\s/_.-]|$)/.test(descriptor),
       isLinkIcon: hasClosest('a[rel~="icon"], link[rel~="icon"]'),
       isSprite: /(?:^|[\s/_.-])sprites?(?:[\s/_.-]|$)/.test(descriptor),
-      isTracking: /tracking|tracker|pixel(?:[\s/_.-]|$)|spacer|clear\.gif|1x1/.test(descriptor)
+      isTracking: width <= 64 && height <= 64 && /(?:^|[\s/_.-])(tracking(?:[-_.]pixel)?|tracker(?:[-_.]pixel)?|pixel|spacer|1x1)(?:[\s/_.-]|$)|clear\.gif/.test(descriptor)
     };
     const classification = classifyImageCandidate(candidate);
     if (!images.some(i => i.src === src)) {

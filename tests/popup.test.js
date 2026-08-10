@@ -261,9 +261,9 @@ describe('Rendered video security and controls', () => {
 
 describe('Image content classification', () => {
   test.each([
-    [{ src: 'https://example.com/favicon.ico', width: 32, height: 32, isFavicon: true }, 'favicon'],
+    [{ src: 'https://example.com/favicon.ico', width: 32, height: 32 }, 'favicon'],
     [{ src: 'https://example.com/icon.png', width: 48, height: 48, isLinkIcon: true }, 'link icon'],
-    [{ src: 'https://example.com/pixel.gif', width: 1, height: 1, isTracking: true }, 'tracking'],
+    [{ src: 'https://example.com/tracking-pixel.gif', width: 1, height: 1 }, 'tracking'],
     [{ src: 'https://example.com/sprites.png', width: 512, height: 512, isSprite: true }, 'sprite']
   ])('rejects obvious non-content assets %#', (candidate, reason) => {
     const { classifyImageCandidate } = loadPopupHelpers();
@@ -293,6 +293,34 @@ describe('Image content classification', () => {
     expect(result.classification).toBe('content');
     expect(result.score).toBeGreaterThanOrEqual(2);
     expect(result.reasons.length).toBeGreaterThan(0);
+  });
+
+  test.each([
+    {
+      src: 'https://example.com/wildlife-tracking-guide.jpg',
+      alt: 'Wildlife tracking guide in a forest',
+      width: 900,
+      height: 600,
+      inArticle: true
+    },
+    {
+      src: 'https://example.com/pixel-art-landscape.jpg',
+      alt: 'Colorful pixel art mountain landscape',
+      width: 900,
+      height: 600,
+      inArticle: true
+    }
+  ])('does not hard-veto ordinary content whose filename contains tracking or pixel-art', (candidate) => {
+    const result = loadPopupHelpers().classifyImageCandidate(candidate);
+
+    expect(result.classification).toBe('content');
+    expect(result.reasons).not.toContain('tracking indicator');
+  });
+
+  test('does not retain the unused non-self-contained scraper duplicate', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+
+    expect(source).not.toContain('function scrapePageFromContent()');
   });
 
   test('rejects badges even when their dimensions are otherwise content-sized', () => {
@@ -345,7 +373,7 @@ describe('Image content classification', () => {
   test('keeps popup and injected classifier scoring logic identical', () => {
     const source = fs.readFileSync(popupJsPath, 'utf8');
     const pureStart = source.indexOf('function classifyImageCandidate(candidate) {');
-    const pureEnd = source.indexOf('// Function that can be injected', pureStart);
+    const pureEnd = source.indexOf('// DOM Elements', pureStart);
     const injectedStart = source.indexOf('const classifyImageCandidate = candidate => {', pureEnd);
     const injectedEnd = source.indexOf('const defaults = {', injectedStart);
     const normalizeBody = (body) => body
