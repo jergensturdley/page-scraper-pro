@@ -18,7 +18,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController };`, context);
   return context.popupHelpers;
 }
 
@@ -99,7 +99,8 @@ describe('Popup URL helper regressions', () => {
     );
 
     expect(scrapeFunction).toContain("currentTabUrl = tab.url || '';");
-    expect(scrapeFunction).toContain('elements.currentPage.textContent = url.hostname || currentTabUrl;');
+    expect(scrapeFunction).toContain('updateCurrentPage(tab);');
+    expect(fs.readFileSync(popupJsPath, 'utf8')).toContain('elements.currentPage.textContent = url.hostname || currentTabUrl;');
     expect(scrapeFunction.indexOf("currentTabUrl = tab.url || '';"))
       .toBeLessThan(scrapeFunction.indexOf('chrome.scripting.executeScript'));
   });
@@ -611,6 +612,58 @@ describe('Per-tab session workspace cache', () => {
     expect(normalizeWorkspace(cached, 42)).toBeNull();
   });
 
+  test('switches workspace identity from tab A to tab B and cancels pending work', () => {
+    const { createWorkspaceTabController } = loadPopupHelpers();
+    const cancelPendingSave = jest.fn();
+    const controller = createWorkspaceTabController(cancelPendingSave);
+
+    const tabA = controller.activate(11);
+    const tabB = controller.activate(22);
+
+    expect(tabA).toEqual({ tabId: 11, generation: 1 });
+    expect(tabB).toEqual({ tabId: 22, generation: 2 });
+    expect(controller.current()).toEqual(tabB);
+    expect(controller.isCurrent(tabA)).toBe(false);
+    expect(controller.isCurrent(tabB)).toBe(true);
+  });
+
+  test('cancels the pending debounce as soon as another tab activates', () => {
+    const { createWorkspaceTabController } = loadPopupHelpers();
+    const cancelPendingSave = jest.fn();
+    const controller = createWorkspaceTabController(cancelPendingSave);
+    controller.activate(11);
+    cancelPendingSave.mockClear();
+
+    controller.activate(22);
+
+    expect(cancelPendingSave).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not apply an async restore that completes after another tab activates', async () => {
+    const { createWorkspaceTabController } = loadPopupHelpers();
+    const controller = createWorkspaceTabController(jest.fn());
+    const applyRestore = jest.fn();
+    let finishRestore;
+    const restore = new Promise(resolve => { finishRestore = resolve; });
+    const tabA = controller.activate(11);
+    const completion = restore.then(() => controller.runIfCurrent(tabA, applyRestore));
+
+    controller.activate(22);
+    finishRestore();
+    await completion;
+
+    expect(applyRestore).not.toHaveBeenCalled();
+  });
+
+  test('re-enables scrape controls when an active-tab switch resets the workspace', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const resetSource = source.slice(
+      source.indexOf('function resetInMemoryWorkspace'),
+      source.indexOf('async function handleActiveTabChanged')
+    );
+    expect(resetSource).toContain('elements.scrapeBtn.disabled = false;');
+  });
+
   test('wires session-only restore, persistence, and cleanup controls', () => {
     const html = fs.readFileSync(popupHtmlPath, 'utf8');
     const popupSource = fs.readFileSync(popupJsPath, 'utf8');
@@ -620,6 +673,8 @@ describe('Per-tab session workspace cache', () => {
     expect(popupSource).toContain('chrome.storage.session');
     expect(popupSource).toContain('restoreWorkspaceForCurrentTab');
     expect(popupSource).toContain('scheduleWorkspaceSave');
+    expect(popupSource).toContain('chrome.tabs.onActivated.addListener');
+    expect(popupSource).toContain('handleActiveTabChanged');
     expect(popupSource).toContain('Restored from this tab · scraped');
     expect(popupSource).not.toMatch(/storage\.local.*workspace|workspace.*storage\.local/);
     expect(backgroundSource).toContain('chrome.tabs.onRemoved.addListener');

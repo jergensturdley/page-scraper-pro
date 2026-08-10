@@ -192,6 +192,35 @@ function normalizeWorkspace(value, expectedTabId) {
   };
 }
 
+function createWorkspaceTabController(cancelPendingSave) {
+  let tabId = null;
+  let generation = 0;
+  const cancel = typeof cancelPendingSave === 'function' ? cancelPendingSave : () => {};
+
+  return {
+    activate(nextTabId) {
+      if (!Number.isInteger(nextTabId) || nextTabId <= 0) {
+        throw new TypeError('A positive integer tab ID is required');
+      }
+      cancel();
+      tabId = nextTabId;
+      generation += 1;
+      return { tabId, generation };
+    },
+    current() {
+      return { tabId, generation };
+    },
+    isCurrent(token) {
+      return Boolean(token) && token.tabId === tabId && token.generation === generation;
+    },
+    runIfCurrent(token, callback) {
+      if (!this.isCurrent(token) || typeof callback !== 'function') return false;
+      callback();
+      return true;
+    }
+  };
+}
+
 function classifyImageCandidate(candidate) {
   const value = candidate && typeof candidate === 'object' ? candidate : {};
   const context = value.context && typeof value.context === 'object' ? value.context : {};
@@ -308,40 +337,98 @@ const elements = {
   detachBtn: document.getElementById('detachBtn')
 };
 
+const workspaceTabController = createWorkspaceTabController(cancelPendingWorkspaceSave);
+
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
-  await Promise.all([getCurrentTab(), loadSettings()]);
-  await restoreWorkspaceForCurrentTab();
+  const [tabToken] = await Promise.all([getCurrentTab(), loadSettings()]);
+  await restoreWorkspaceForCurrentTab(tabToken);
   detectSidebarMode();
 });
 
 // Get current tab info
+function cancelPendingWorkspaceSave() {
+  if (!workspaceSaveTimer) return;
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer = null;
+}
+
+function activateWorkspaceTab(tabId) {
+  const token = workspaceTabController.activate(tabId);
+  currentTabId = token.tabId;
+  return token;
+}
+
+function updateCurrentPage(tab) {
+  currentTabUrl = tab && typeof tab.url === 'string' ? tab.url : '';
+  try {
+    const url = new URL(currentTabUrl);
+    elements.currentPage.textContent = url.hostname || currentTabUrl;
+  } catch (urlError) {
+    elements.currentPage.textContent = currentTabUrl || 'Unknown page';
+  }
+}
+
 async function getCurrentTab() {
+  const startingGeneration = workspaceTabController.current().generation;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) {
+    if (workspaceTabController.current().generation !== startingGeneration) {
+      return workspaceTabController.current();
+    }
+    if (!tab || !Number.isInteger(tab.id)) {
       elements.currentPage.textContent = 'No active tab';
-      return;
+      return null;
     }
 
-    if (currentTabId !== tab.id && workspaceSaveTimer) {
-      clearTimeout(workspaceSaveTimer);
-      workspaceSaveTimer = null;
-    }
-    currentTabId = tab.id;
-    currentTabUrl = tab.url || '';
-
-    try {
-      const url = new URL(currentTabUrl);
-      elements.currentPage.textContent = url.hostname || currentTabUrl;
-    } catch (urlError) {
-      elements.currentPage.textContent = currentTabUrl || 'Unknown page';
-    }
+    const token = activateWorkspaceTab(tab.id);
+    updateCurrentPage(tab);
+    return token;
   } catch (error) {
     console.error('Failed to get current tab:', error);
     elements.currentPage.textContent = 'Unknown page';
+    return null;
   }
+}
+
+function resetInMemoryWorkspace(status = 'Ready') {
+  scrapedData = { images: [], videos: [], audios: [], links: [], text: '' };
+  scrapedAt = null;
+  activeResultTab = 'images';
+  currentImageFilter = 'content';
+  selectedImages.clear();
+  if (elements.imageFilter) elements.imageFilter.value = '';
+  if (elements.linkFilter) elements.linkFilter.value = '';
+  elements.filterChips.forEach(chip => chip.classList.remove('active'));
+  const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
+  if (contentChip) contentChip.classList.add('active');
+  switchTab('images', false);
+  updateUI(false);
+  updateSelectionToolbar();
+  elements.scrapeBtn.disabled = false;
+  setScrapeButtonLabel('Scrape Page Data');
+  elements.status.textContent = status;
+}
+
+async function handleActiveTabChanged(activeInfo) {
+  if (!activeInfo || !Number.isInteger(activeInfo.tabId) || activeInfo.tabId <= 0) return;
+  const token = activateWorkspaceTab(activeInfo.tabId);
+  currentTabUrl = '';
+  elements.currentPage.textContent = 'Loading...';
+  resetInMemoryWorkspace();
+
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (workspaceTabController.isCurrent(token)) updateCurrentPage(tab);
+  } catch (error) {
+    if (workspaceTabController.isCurrent(token)) {
+      console.warn('Failed to refresh active tab:', error);
+      elements.currentPage.textContent = 'Unknown page';
+    }
+  }
+
+  await restoreWorkspaceForCurrentTab(token);
 }
 
 function getSessionStorage() {
@@ -388,13 +475,16 @@ function setScrapeButtonLabel(label) {
   `;
 }
 
-async function saveWorkspaceForTab(tabId) {
-  if (!Number.isInteger(tabId) || tabId !== currentTabId || !scrapedAt) return;
+async function saveWorkspaceForTab(token = workspaceTabController.current()) {
+  if (!workspaceTabController.isCurrent(token) || !scrapedAt) return;
   try {
-    const key = getWorkspaceCacheKey(tabId);
-    const serialized = serializeWorkspace(tabId, getWorkspaceSnapshot());
+    const key = getWorkspaceCacheKey(token.tabId);
+    const serialized = serializeWorkspace(token.tabId, getWorkspaceSnapshot());
+    if (!workspaceTabController.isCurrent(token)) return;
     await getSessionStorage().set({ [key]: serialized });
+    if (!workspaceTabController.isCurrent(token)) return;
   } catch (error) {
+    if (!workspaceTabController.isCurrent(token)) return;
     console.warn('Failed to save tab workspace:', error);
     showWorkspaceWarning();
   }
@@ -402,22 +492,21 @@ async function saveWorkspaceForTab(tabId) {
 
 function scheduleWorkspaceSave() {
   if (!Number.isInteger(currentTabId) || !scrapedAt) return;
-  if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer);
-  const scheduledTabId = currentTabId;
+  cancelPendingWorkspaceSave();
+  const token = workspaceTabController.current();
   workspaceSaveTimer = setTimeout(() => {
     workspaceSaveTimer = null;
-    if (scheduledTabId === currentTabId) saveWorkspaceForTab(scheduledTabId);
+    if (workspaceTabController.isCurrent(token)) saveWorkspaceForTab(token);
   }, 250);
 }
 
-async function restoreWorkspaceForCurrentTab() {
-  if (!Number.isInteger(currentTabId)) return;
-  const tabId = currentTabId;
+async function restoreWorkspaceForCurrentTab(token = workspaceTabController.current()) {
+  if (!workspaceTabController.isCurrent(token)) return;
   try {
-    const key = getWorkspaceCacheKey(tabId);
+    const key = getWorkspaceCacheKey(token.tabId);
     const stored = await getSessionStorage().get(key);
-    if (tabId !== currentTabId) return;
-    const workspace = normalizeWorkspace(stored && stored[key], tabId);
+    if (!workspaceTabController.isCurrent(token)) return;
+    const workspace = normalizeWorkspace(stored && stored[key], token.tabId);
     if (!workspace) return;
 
     scrapedData = workspace.scrapedData;
@@ -434,37 +523,22 @@ async function restoreWorkspaceForCurrentTab() {
     setScrapeButtonLabel('Rescrape');
     elements.status.textContent = `Restored from this tab · scraped ${formatRelativeTime(scrapedAt)}`;
   } catch (error) {
+    if (!workspaceTabController.isCurrent(token)) return;
     console.warn('Failed to restore tab workspace:', error);
     elements.status.textContent = 'Ready · tab session restore unavailable';
   }
 }
 
 async function clearCurrentTabResults() {
-  if (workspaceSaveTimer) {
-    clearTimeout(workspaceSaveTimer);
-    workspaceSaveTimer = null;
-  }
-  const tabId = currentTabId;
-  scrapedData = { images: [], videos: [], audios: [], links: [], text: '' };
-  scrapedAt = null;
-  activeResultTab = 'images';
-  currentImageFilter = 'content';
-  selectedImages.clear();
-  if (elements.imageFilter) elements.imageFilter.value = '';
-  if (elements.linkFilter) elements.linkFilter.value = '';
-  elements.filterChips.forEach(chip => chip.classList.remove('active'));
-  const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
-  if (contentChip) contentChip.classList.add('active');
-  switchTab('images', false);
-  updateUI(false);
-  updateSelectionToolbar();
-  setScrapeButtonLabel('Scrape Page Data');
-  elements.status.textContent = 'Ready';
+  cancelPendingWorkspaceSave();
+  const token = workspaceTabController.current();
+  resetInMemoryWorkspace();
+  if (!workspaceTabController.isCurrent(token) || !Number.isInteger(token.tabId)) return;
 
-  if (!Number.isInteger(tabId)) return;
   try {
-    await getSessionStorage().remove(getWorkspaceCacheKey(tabId));
+    await getSessionStorage().remove(getWorkspaceCacheKey(token.tabId));
   } catch (error) {
+    if (!workspaceTabController.isCurrent(token)) return;
     console.warn('Failed to clear tab workspace:', error);
     elements.status.textContent = 'Results cleared · saved tab session could not be removed';
   }
@@ -472,6 +546,7 @@ async function clearCurrentTabResults() {
 
 // Setup event listeners
 function setupEventListeners() {
+  chrome.tabs.onActivated.addListener(handleActiveTabChanged);
   elements.scrapeBtn.addEventListener('click', scrapePageData);
   elements.copyBtn.addEventListener('click', copyAllData);
   if (elements.clearResultsBtn) elements.clearResultsBtn.addEventListener('click', clearCurrentTabResults);
@@ -556,27 +631,26 @@ function switchTab(tabName, persist = true) {
 
 // Scrape page data
 async function scrapePageData() {
+  let operationToken = null;
   try {
     elements.scrapeBtn.disabled = true;
     elements.status.innerHTML = '<span class="spinner"></span> Scraping...';
-    
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
       throw new Error('No active tab');
     }
 
-    if (currentTabId !== tab.id && workspaceSaveTimer) {
-      clearTimeout(workspaceSaveTimer);
-      workspaceSaveTimer = null;
+    if (currentTabId !== tab.id) {
+      operationToken = activateWorkspaceTab(tab.id);
+      resetInMemoryWorkspace();
+      elements.scrapeBtn.disabled = true;
+    } else {
+      operationToken = workspaceTabController.current();
     }
-    currentTabId = tab.id;
     currentTabUrl = tab.url || '';
-    try {
-      const url = new URL(currentTabUrl);
-      elements.currentPage.textContent = url.hostname || currentTabUrl;
-    } catch (urlError) {
-      elements.currentPage.textContent = currentTabUrl || 'Unknown page';
-    }
+    updateCurrentPage(tab);
+    elements.status.innerHTML = '<span class="spinner"></span> Scraping...';
 
     // Pass a snapshot because injected functions do not share the popup context.
     const scrapeSettings = { ...settings };
@@ -585,7 +659,8 @@ async function scrapePageData() {
       func: scrapePageFromContentFallback,
       args: [scrapeSettings]
     });
-    
+    if (!workspaceTabController.isCurrent(operationToken)) return;
+
     if (results && results[0] && results[0].result) {
       scrapedData = copyScrapedData(results[0].result);
       scrapedAt = Date.now();
@@ -593,18 +668,21 @@ async function scrapePageData() {
       selectedImages = new Set([...selectedImages].filter(url => imageUrls.has(url)));
       updateUI();
       updateSelectionToolbar();
-      await saveWorkspaceForTab(currentTabId);
-      showToast('Page scraped successfully!');
+      await saveWorkspaceForTab(operationToken);
+      if (workspaceTabController.isCurrent(operationToken)) showToast('Page scraped successfully!');
     } else {
       throw new Error('No results returned');
     }
   } catch (error) {
+    if (operationToken && !workspaceTabController.isCurrent(operationToken)) return;
     console.error('Scraping error:', error);
     showToast('Error scraping page: ' + error.message);
     elements.status.textContent = scrapedAt ? 'Results kept · rescrape failed' : 'Scrape failed';
   } finally {
-    elements.scrapeBtn.disabled = false;
-    setScrapeButtonLabel(scrapedAt ? 'Rescrape' : 'Scrape Page Data');
+    if (!operationToken || workspaceTabController.isCurrent(operationToken)) {
+      elements.scrapeBtn.disabled = false;
+      setScrapeButtonLabel(scrapedAt ? 'Rescrape' : 'Scrape Page Data');
+    }
   }
 }
 
