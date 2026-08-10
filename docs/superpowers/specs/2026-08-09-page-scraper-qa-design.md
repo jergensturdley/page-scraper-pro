@@ -14,6 +14,20 @@ Make the Manifest V3 extension reliable, safe, keyboard-accessible, and polished
 - Use packaged ZIP support only; do not load executable dependencies remotely.
 - Stop auto-injecting the page overlay and reduce persistent host access: scrape only after a user action using `activeTab`.
 
+
+### Content-image classification
+- Classify every extracted image without discarding uncertain results. The default `content` view shows likely article, product, gallery, and editorial imagery; an `all` view remains available as an escape hatch.
+- Use a balanced, deterministic score: reject explicit favicon/tracking/sprite inputs; penalize tiny dimensions, extreme aspect ratios, junk-like names (`icon`, `logo`, `avatar`, `badge`), and navigation/header/footer/button placement; reward larger dimensions, meaningful alternative text, and figure/picture/main/article/gallery/product context.
+- Store the classification and concise reason with each image so behavior is explainable and regression-testable.
+- Keep existing Large and XL filters as secondary views, but make Content the initial and reset state.
+
+### Per-tab session continuity
+- Cache each successful scrape in `chrome.storage.session`, keyed by Chrome tab ID, and restore it only for that same tab.
+- Persist the active result tab, image filter, image/link search strings, and selected-image URLs alongside the result data.
+- Identify restored results visibly with their original scrape time and retain a clear Rescrape action.
+- Debounce workspace-state writes, handle session-storage quota failures without losing the active in-memory scrape, and omit or trim oversized optional text before dropping structured result data.
+- Clear cached state when its tab closes and expose an explicit Clear results action. Session data must not survive a browser restart.
+
 ### Operate-mode dark interface
 - Retain dark charcoal surfaces and introduce semantic tokens for warm neutral text, borders, focus, success/error states, and one blue action accent.
 - Structure the popup around page context, a single dominant scrape action, status feedback, result tabs, and export/download actions.
@@ -30,10 +44,10 @@ Make the Manifest V3 extension reliable, safe, keyboard-accessible, and polished
 
 ## Implementation boundaries
 - `popup.html`, `popup.js`, and `styles.css` own the popup/side-panel interface.
-- `background.js` owns context-menu and download/clipboard orchestration.
+- `background.js` owns context-menu, tab-cache cleanup, and download/clipboard orchestration.
 - `content.js` is retained only for user-triggered content-script communication where needed; it must not append permanent page UI.
 - `manifest.json` centralizes permissions and uses the minimum required access.
-- Jest tests exercise pure/safely exported behavior and source-level UI contracts without requiring Chrome at test runtime.
+- Jest tests exercise pure/safely exported behavior and source-level UI contracts without requiring Chrome at test runtime, including deterministic image classification and per-tab cache serialization/restoration.
 
 ## Verification
 - Follow red-green-refactor for every behavioral correction.
