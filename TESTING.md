@@ -2,7 +2,7 @@
 
 This file separates repeatable automated checks from Chrome-only acceptance checks. A checked automated result does **not** imply that the Chrome checklist has been run.
 
-## Automated verification record (2026-03-16)
+## Automated verification record (2026-08-10)
 
 Run from the repository root. These are the results recorded for the Task 10 verification pass:
 
