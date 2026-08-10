@@ -56,7 +56,37 @@
 - [ ] **Step 4: Re-run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: PASS.
 - [ ] **Step 5: Commit.** Run: `git add popup.js tests/popup.test.js && git commit -m "Harden rendered scraper results"`.
 
-### Task 4: Correct user-visible operation state and clipboard reporting
+### Task 4: Classify likely content images without hiding all assets
+
+**Files:**
+- Modify: `popup.html`
+- Modify: `popup.js`
+- Modify: `tests/popup.test.js`
+
+- [ ] **Step 1: Write failing classification tests.** Evaluate a pure `classifyImageCandidate(candidate)` helper and assert: favicon/link-icon/tracking-pixel/sprite candidates classify as junk; tiny icon/logo/avatar/header-nav images score below the content threshold; large images in `main article figure`, gallery, or product contexts score as content; uncertain images remain available with reasons; malformed values do not throw.
+- [ ] **Step 2: Run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: FAIL because classification and reason metadata do not exist.
+- [ ] **Step 3: Implement deterministic scoring.** Capture safe image context flags inside the injected scraper, call a dependency-free classification routine available to the injected function, and attach `{ classification: 'content' | 'junk', classificationScore, classificationReasons }` to each image. Never discard a candidate solely for a heuristic score; retain only the existing technical safety exclusions.
+- [ ] **Step 4: Make Content the default view.** Replace the initial All chip with active `Content`, retain `All assets`, Large, XL, and Domain controls, set `currentImageFilter = 'content'`, and reset to Content when changing tabs. Filter by classification in `renderImages` while keeping correct visible/total counts.
+- [ ] **Step 5: Run focused and full tests.** Run: `npm test -- --runInBand tests/popup.test.js && npm test -- --runInBand && node --check popup.js`. Expected: PASS.
+- [ ] **Step 6: Commit.** Run: `git add popup.html popup.js tests/popup.test.js && git commit -m "Filter likely content images by default"`.
+
+### Task 5: Restore per-tab scrape workspaces during the browser session
+
+**Files:**
+- Modify: `popup.html`
+- Modify: `popup.js`
+- Modify: `background.js`
+- Modify: `tests/popup.test.js`
+
+- [ ] **Step 1: Write failing cache-model tests.** Assert pure helpers create a versioned cache key from tab ID, serialize scraped data plus `scrapedAt`, active tab, image filter, both search terms, and selected image URLs, and trim optional page text before structured data when an explicit size budget is exceeded. Assert another tab ID cannot restore the entry.
+- [ ] **Step 2: Run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: FAIL because cache serialization/restoration helpers do not exist.
+- [ ] **Step 3: Implement successful-scrape persistence.** After `getCurrentTab`, read `chrome.storage.session` for that tab key; restore compatible data and UI state, call `updateUI`, and show `Restored from this tab · scraped <relative time>`. After a successful scrape, save the versioned workspace; cache failures show a non-destructive warning while retaining in-memory results.
+- [ ] **Step 4: Persist workspace changes safely.** Track current result tab in `switchTab`; debounce session writes after tab/filter/search/selection changes; intersect restored selections with restored image URLs; cancel obsolete timers when the active tab changes.
+- [ ] **Step 5: Add explicit and automatic cleanup.** Add a labelled `Clear results` action that removes only the current tab key and resets in-memory UI. In `background.js`, register `chrome.tabs.onRemoved` to remove that tab's session-cache key. Preserve Chrome-session-only behavior by using `storage.session`, never `storage.local`.
+- [ ] **Step 6: Run focused and full tests.** Run: `npm test -- --runInBand tests/popup.test.js && npm test -- --runInBand && node --check popup.js && node --check background.js`. Expected: PASS.
+- [ ] **Step 7: Commit.** Run: `git add popup.html popup.js background.js tests/popup.test.js && git commit -m "Restore per-tab scrape sessions"`.
+
+### Task 6: Correct user-visible operation state and clipboard reporting
 
 **Files:**
 - Modify: `popup.html`
@@ -71,7 +101,7 @@
 - [ ] **Step 4: Re-run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: PASS.
 - [ ] **Step 5: Commit.** Run: `git add popup.html popup.js background.js content.js tests/popup.test.js && git commit -m "Report scraper operations accurately"`.
 
-### Task 5: Build semantic, keyboard-complete popup controls and dialogs
+### Task 7: Build semantic, keyboard-complete popup controls and dialogs
 
 **Files:**
 - Modify: `popup.html`
@@ -85,7 +115,7 @@
 - [ ] **Step 4: Re-run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: PASS.
 - [ ] **Step 5: Commit.** Run: `git add popup.html popup.js styles.css tests/popup.test.js && git commit -m "Make popup controls keyboard accessible"`.
 
-### Task 6: Refine the responsive dark operate interface
+### Task 8: Refine the responsive dark operate interface
 
 **Files:**
 - Modify: `styles.css`
@@ -99,7 +129,7 @@
 - [ ] **Step 4: Re-run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: PASS.
 - [ ] **Step 5: Commit.** Run: `git add popup.html popup.js styles.css tests/popup.test.js && git commit -m "Polish responsive dark scraper interface"`.
 
-### Task 7: Reduce extension surface and remove remote executable fallback
+### Task 9: Reduce extension surface and remove remote executable fallback
 
 **Files:**
 - Modify: `manifest.json`
@@ -115,7 +145,7 @@
 - [ ] **Step 4: Re-run focused tests.** Run: `npm test -- --runInBand tests/popup.test.js`. Expected: PASS.
 - [ ] **Step 5: Commit.** Run: `git add manifest.json content.js content.css background.js README.md tests/popup.test.js && git commit -m "Reduce scraper extension permissions"`.
 
-### Task 8: Verify the complete extension path
+### Task 10: Verify the complete extension path
 
 **Files:**
 - Modify: `TESTING.md`
@@ -128,6 +158,6 @@
 
 ## Self-review
 
-- Spec coverage: Tasks 1–4 cover correctness, safety, settings, exports, embeds, feedback, and clipboard. Tasks 5–6 cover accessibility, responsive dark design, and state. Task 7 covers permissions and executable-code policy. Task 8 covers verification and manual QA.
+- Spec coverage: Tasks 1–3 cover correctness, settings, exports, embeds, and rendering safety. Task 4 adds explainable default content-image classification. Task 5 adds per-tab session workspace continuity. Tasks 6–8 cover truthful feedback, accessibility, responsive dark design, and UI state. Task 9 covers permissions and executable-code policy. Task 10 covers verification and manual QA.
 - Placeholder scan: clear; each task contains concrete paths, commands, and changes.
 - Naming consistency: `currentTabUrl`, `getVideoProviderId`, `buildExportData`, `scrapePageFromContentFallback(scrapeSettings)`, and `switchTab` are used consistently.
