@@ -3,6 +3,21 @@
 // Track active downloads
 const activeDownloads = new Map();
 
+const WORKSPACE_CACHE_VERSION = 1;
+const WORKSPACE_CACHE_PREFIX = `page-scraper-workspace:v${WORKSPACE_CACHE_VERSION}:tab:`;
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.storage || !chrome.storage.session) return;
+  try {
+    const removal = chrome.storage.session.remove(`${WORKSPACE_CACHE_PREFIX}${tabId}`);
+    if (removal && typeof removal.catch === 'function') {
+      removal.catch(error => console.warn('Failed to remove closed tab workspace:', error));
+    }
+  } catch (error) {
+    console.warn('Failed to remove closed tab workspace:', error);
+  }
+});
+
 // Create context menu on installation
 chrome.runtime.onInstalled.addListener(() => {
   // Main context menu

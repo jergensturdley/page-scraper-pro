@@ -24,6 +24,10 @@ let scrapedData = {
 };
 
 let currentTabUrl = '';
+let currentTabId = null;
+let scrapedAt = null;
+let activeResultTab = 'images';
+let workspaceSaveTimer = null;
 
 function getVideoProviderId(url) {
   try {
@@ -63,6 +67,128 @@ function buildExportData(url, data) {
     url,
     timestamp: new Date().toISOString(),
     ...data
+  };
+}
+
+const WORKSPACE_CACHE_VERSION = 1;
+const WORKSPACE_CACHE_PREFIX = `page-scraper-workspace:v${WORKSPACE_CACHE_VERSION}:tab:`;
+const WORKSPACE_SIZE_BUDGET_BYTES = 1024 * 1024;
+const RESULT_TABS = new Set(['images', 'videos', 'audios', 'links', 'text']);
+const IMAGE_FILTERS = new Set(['content', 'all', 'large', 'xlarge', 'domain']);
+
+function getWorkspaceCacheKey(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    throw new TypeError('A positive integer tab ID is required');
+  }
+  return `${WORKSPACE_CACHE_PREFIX}${tabId}`;
+}
+
+function jsonSize(value) {
+  const json = JSON.stringify(value);
+  try {
+    return unescape(encodeURIComponent(json)).length;
+  } catch (error) {
+    return json.length;
+  }
+}
+
+function copyScrapedData(value) {
+  const data = value && typeof value === 'object' ? value : {};
+  return {
+    images: Array.isArray(data.images) ? data.images.filter(item => item && typeof item === 'object') : [],
+    videos: Array.isArray(data.videos) ? data.videos.filter(item => item && typeof item === 'object') : [],
+    audios: Array.isArray(data.audios) ? data.audios.filter(item => item && typeof item === 'object') : [],
+    links: Array.isArray(data.links) ? data.links.filter(item => item && typeof item === 'object') : [],
+    text: typeof data.text === 'string' ? data.text : ''
+  };
+}
+
+function serializeWorkspace(tabId, workspace, sizeBudget = WORKSPACE_SIZE_BUDGET_BYTES) {
+  getWorkspaceCacheKey(tabId);
+  const value = workspace && typeof workspace === 'object' ? workspace : {};
+  const data = copyScrapedData(value.scrapedData);
+  const serialized = {
+    version: WORKSPACE_CACHE_VERSION,
+    tabId,
+    scrapedData: data,
+    scrapedAt: Number.isFinite(value.scrapedAt) && value.scrapedAt > 0 ? value.scrapedAt : Date.now(),
+    activeResultTab: RESULT_TABS.has(value.activeResultTab) ? value.activeResultTab : 'images',
+    currentImageFilter: IMAGE_FILTERS.has(value.currentImageFilter) ? value.currentImageFilter : 'content',
+    imageSearch: typeof value.imageSearch === 'string' ? value.imageSearch : '',
+    linkSearch: typeof value.linkSearch === 'string' ? value.linkSearch : '',
+    selectedImageUrls: Array.isArray(value.selectedImageUrls)
+      ? [...new Set(value.selectedImageUrls.filter(url => typeof url === 'string'))]
+      : []
+  };
+  const budget = Number.isFinite(sizeBudget) && sizeBudget > 0 ? Math.floor(sizeBudget) : WORKSPACE_SIZE_BUDGET_BYTES;
+  const initialImageUrls = new Set(data.images.map(image => image.src).filter(url => typeof url === 'string'));
+  serialized.selectedImageUrls = serialized.selectedImageUrls.filter(url => initialImageUrls.has(url));
+
+  if (jsonSize(serialized) > budget && data.text) {
+    let low = 0;
+    let high = data.text.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const original = data.text;
+      data.text = original.slice(0, middle);
+      const fits = jsonSize(serialized) <= budget;
+      data.text = original;
+      if (fits) low = middle;
+      else high = middle - 1;
+    }
+    data.text = data.text.slice(0, low);
+  }
+
+  // Structured results are reduced only after all optional page text is omitted.
+  const arrays = ['links', 'audios', 'videos', 'images'];
+  for (const name of arrays) {
+    if (jsonSize(serialized) <= budget || data[name].length === 0) continue;
+    const original = data[name];
+    let low = 0;
+    let high = original.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      data[name] = original.slice(0, middle);
+      if (jsonSize(serialized) <= budget) low = middle;
+      else high = middle - 1;
+    }
+    data[name] = original.slice(0, low);
+  }
+  const imageUrls = new Set(data.images.map(image => image.src).filter(url => typeof url === 'string'));
+  serialized.selectedImageUrls = serialized.selectedImageUrls.filter(url => imageUrls.has(url));
+  if (jsonSize(serialized) > budget) {
+    throw new RangeError('Workspace cannot fit within the size budget');
+  }
+  return serialized;
+}
+
+function normalizeWorkspace(value, expectedTabId) {
+  try {
+    getWorkspaceCacheKey(expectedTabId);
+  } catch (error) {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || value.version !== WORKSPACE_CACHE_VERSION || value.tabId !== expectedTabId) {
+    return null;
+  }
+  const data = value.scrapedData;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.images) || !Array.isArray(data.videos) ||
+      !Array.isArray(data.audios) || !Array.isArray(data.links) || typeof data.text !== 'string' ||
+      !Number.isFinite(value.scrapedAt) || value.scrapedAt <= 0) {
+    return null;
+  }
+  const scrapedData = copyScrapedData(data);
+  const imageUrls = new Set(scrapedData.images.map(image => image.src).filter(url => typeof url === 'string'));
+  return {
+    scrapedData,
+    scrapedAt: value.scrapedAt,
+    activeResultTab: RESULT_TABS.has(value.activeResultTab) ? value.activeResultTab : 'images',
+    currentImageFilter: IMAGE_FILTERS.has(value.currentImageFilter) ? value.currentImageFilter : 'content',
+    imageSearch: typeof value.imageSearch === 'string' ? value.imageSearch : '',
+    linkSearch: typeof value.linkSearch === 'string' ? value.linkSearch : '',
+    selectedImageUrls: Array.isArray(value.selectedImageUrls)
+      ? [...new Set(value.selectedImageUrls.filter(url => typeof url === 'string' && imageUrls.has(url)))]
+      : []
   };
 }
 
@@ -155,6 +281,7 @@ const elements = {
   linkCount: document.getElementById('linkCount'),
   scrapeBtn: document.getElementById('scrapeBtn'),
   copyBtn: document.getElementById('copyBtn'),
+  clearResultsBtn: document.getElementById('clearResultsBtn'),
   exportJson: document.getElementById('exportJson'),
   exportImages: document.getElementById('exportImages'),
   exportVideos: document.getElementById('exportVideos'),
@@ -183,9 +310,9 @@ const elements = {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
-  await getCurrentTab();
   setupEventListeners();
-  loadSettings();
+  await Promise.all([getCurrentTab(), loadSettings()]);
+  await restoreWorkspaceForCurrentTab();
   detectSidebarMode();
 });
 
@@ -198,6 +325,11 @@ async function getCurrentTab() {
       return;
     }
 
+    if (currentTabId !== tab.id && workspaceSaveTimer) {
+      clearTimeout(workspaceSaveTimer);
+      workspaceSaveTimer = null;
+    }
+    currentTabId = tab.id;
     currentTabUrl = tab.url || '';
 
     try {
@@ -212,10 +344,137 @@ async function getCurrentTab() {
   }
 }
 
+function getSessionStorage() {
+  if (!chrome.storage || !chrome.storage.session) {
+    throw new Error('Session storage is unavailable');
+  }
+  return chrome.storage.session;
+}
+
+function getWorkspaceSnapshot() {
+  return {
+    scrapedData,
+    scrapedAt,
+    activeResultTab,
+    currentImageFilter,
+    imageSearch: elements.imageFilter ? elements.imageFilter.value : '',
+    linkSearch: elements.linkFilter ? elements.linkFilter.value : '',
+    selectedImageUrls: [...selectedImages]
+  };
+}
+
+function showWorkspaceWarning() {
+  elements.status.textContent = 'Results kept · unable to save this tab session';
+}
+
+function formatRelativeTime(timestamp) {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 60) return 'just now';
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+function setScrapeButtonLabel(label) {
+  elements.scrapeBtn.innerHTML = `
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
+      <polyline points="7.5 12 12 16 16.5 12"/>
+    </svg>
+    ${label}
+  `;
+}
+
+async function saveWorkspaceForTab(tabId) {
+  if (!Number.isInteger(tabId) || tabId !== currentTabId || !scrapedAt) return;
+  try {
+    const key = getWorkspaceCacheKey(tabId);
+    const serialized = serializeWorkspace(tabId, getWorkspaceSnapshot());
+    await getSessionStorage().set({ [key]: serialized });
+  } catch (error) {
+    console.warn('Failed to save tab workspace:', error);
+    showWorkspaceWarning();
+  }
+}
+
+function scheduleWorkspaceSave() {
+  if (!Number.isInteger(currentTabId) || !scrapedAt) return;
+  if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer);
+  const scheduledTabId = currentTabId;
+  workspaceSaveTimer = setTimeout(() => {
+    workspaceSaveTimer = null;
+    if (scheduledTabId === currentTabId) saveWorkspaceForTab(scheduledTabId);
+  }, 250);
+}
+
+async function restoreWorkspaceForCurrentTab() {
+  if (!Number.isInteger(currentTabId)) return;
+  const tabId = currentTabId;
+  try {
+    const key = getWorkspaceCacheKey(tabId);
+    const stored = await getSessionStorage().get(key);
+    if (tabId !== currentTabId) return;
+    const workspace = normalizeWorkspace(stored && stored[key], tabId);
+    if (!workspace) return;
+
+    scrapedData = workspace.scrapedData;
+    scrapedAt = workspace.scrapedAt;
+    activeResultTab = workspace.activeResultTab;
+    currentImageFilter = workspace.currentImageFilter;
+    selectedImages = new Set(workspace.selectedImageUrls);
+    if (elements.imageFilter) elements.imageFilter.value = workspace.imageSearch;
+    if (elements.linkFilter) elements.linkFilter.value = workspace.linkSearch;
+    elements.filterChips.forEach(chip => chip.classList.toggle('active', chip.dataset.filter === currentImageFilter));
+    switchTab(activeResultTab, false);
+    updateUI(false);
+    updateSelectionToolbar();
+    setScrapeButtonLabel('Rescrape');
+    elements.status.textContent = `Restored from this tab · scraped ${formatRelativeTime(scrapedAt)}`;
+  } catch (error) {
+    console.warn('Failed to restore tab workspace:', error);
+    elements.status.textContent = 'Ready · tab session restore unavailable';
+  }
+}
+
+async function clearCurrentTabResults() {
+  if (workspaceSaveTimer) {
+    clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = null;
+  }
+  const tabId = currentTabId;
+  scrapedData = { images: [], videos: [], audios: [], links: [], text: '' };
+  scrapedAt = null;
+  activeResultTab = 'images';
+  currentImageFilter = 'content';
+  selectedImages.clear();
+  if (elements.imageFilter) elements.imageFilter.value = '';
+  if (elements.linkFilter) elements.linkFilter.value = '';
+  elements.filterChips.forEach(chip => chip.classList.remove('active'));
+  const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
+  if (contentChip) contentChip.classList.add('active');
+  switchTab('images', false);
+  updateUI(false);
+  updateSelectionToolbar();
+  setScrapeButtonLabel('Scrape Page Data');
+  elements.status.textContent = 'Ready';
+
+  if (!Number.isInteger(tabId)) return;
+  try {
+    await getSessionStorage().remove(getWorkspaceCacheKey(tabId));
+  } catch (error) {
+    console.warn('Failed to clear tab workspace:', error);
+    elements.status.textContent = 'Results cleared · saved tab session could not be removed';
+  }
+}
+
 // Setup event listeners
 function setupEventListeners() {
   elements.scrapeBtn.addEventListener('click', scrapePageData);
   elements.copyBtn.addEventListener('click', copyAllData);
+  if (elements.clearResultsBtn) elements.clearResultsBtn.addEventListener('click', clearCurrentTabResults);
   elements.exportJson.addEventListener('click', exportJson);
   elements.exportImages.addEventListener('click', exportWithImages);
   elements.exportVideos.addEventListener('click', exportVideos);
@@ -242,10 +501,16 @@ function setupEventListeners() {
   
   // Filter inputs
   if (elements.imageFilter) {
-    elements.imageFilter.addEventListener('input', () => renderImages());
+    elements.imageFilter.addEventListener('input', () => {
+      renderImages();
+      scheduleWorkspaceSave();
+    });
   }
   if (elements.linkFilter) {
-    elements.linkFilter.addEventListener('input', () => renderLinks());
+    elements.linkFilter.addEventListener('input', () => {
+      renderLinks();
+      scheduleWorkspaceSave();
+    });
   }
   
   // Filter chips
@@ -257,6 +522,7 @@ function setupEventListeners() {
       // Re-render with filter
       currentImageFilter = chip.dataset.filter;
       renderImages();
+      scheduleWorkspaceSave();
     });
   });
 
@@ -275,23 +541,17 @@ function setupEventListeners() {
 }
 
 // Switch tabs
-function switchTab(tabName) {
+function switchTab(tabName, persist = true) {
+  const nextTab = RESULT_TABS.has(tabName) ? tabName : 'images';
+  activeResultTab = nextTab;
   elements.tabBtns.forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
-  
-  // Reset image filter when switching away from images tab
-  if (tabName !== 'images' && elements.filterChips) {
-    elements.filterChips.forEach(c => c.classList.remove('active'));
-    const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
-    if (contentChip) contentChip.classList.add('active');
-    currentImageFilter = 'content';
-    if (elements.imageFilter) elements.imageFilter.value = '';
-  }
-  
-  const tabBtn = document.querySelector(`[data-tab="${tabName}"]`);
-  const tabPane = document.getElementById(`${tabName}Tab`);
+
+  const tabBtn = document.querySelector(`[data-tab="${nextTab}"]`);
+  const tabPane = document.getElementById(`${nextTab}Tab`);
   if (tabBtn) tabBtn.classList.add('active');
   if (tabPane) tabPane.classList.add('active');
+  if (persist) scheduleWorkspaceSave();
 }
 
 // Scrape page data
@@ -305,6 +565,11 @@ async function scrapePageData() {
       throw new Error('No active tab');
     }
 
+    if (currentTabId !== tab.id && workspaceSaveTimer) {
+      clearTimeout(workspaceSaveTimer);
+      workspaceSaveTimer = null;
+    }
+    currentTabId = tab.id;
     currentTabUrl = tab.url || '';
     try {
       const url = new URL(currentTabUrl);
@@ -322,8 +587,13 @@ async function scrapePageData() {
     });
     
     if (results && results[0] && results[0].result) {
-      scrapedData = results[0].result;
+      scrapedData = copyScrapedData(results[0].result);
+      scrapedAt = Date.now();
+      const imageUrls = new Set(scrapedData.images.map(image => image.src));
+      selectedImages = new Set([...selectedImages].filter(url => imageUrls.has(url)));
       updateUI();
+      updateSelectionToolbar();
+      await saveWorkspaceForTab(currentTabId);
       showToast('Page scraped successfully!');
     } else {
       throw new Error('No results returned');
@@ -331,23 +601,15 @@ async function scrapePageData() {
   } catch (error) {
     console.error('Scraping error:', error);
     showToast('Error scraping page: ' + error.message);
-    // Set empty data
-    scrapedData = { images: [], videos: [], audios: [], links: [], text: '' };
-    updateUI();
+    elements.status.textContent = scrapedAt ? 'Results kept · rescrape failed' : 'Scrape failed';
   } finally {
     elements.scrapeBtn.disabled = false;
-    elements.scrapeBtn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M21 16V8a2 2 0 0 0-1-1.73l-8-5a2 2 0 0 0-2 0l-8 5a2 2 0 0 0-1 1.73v8a2 2 0 0 0 1 1.73l8 5a2 2 0 0 0 2 0l8-5a2 2 0 0 0 1-1.73z"/>
-        <polyline points="7.5 12 12 16 16.5 12"/>
-      </svg>
-      Scrape Again
-    `;
+    setScrapeButtonLabel(scrapedAt ? 'Rescrape' : 'Scrape Page Data');
   }
 }
 
 // Update UI with scraped data
-function updateUI() {
+function updateUI(updateStatus = true) {
   // Update stats
   elements.imageCount.textContent = scrapedData.images.length;
   elements.videoCount.textContent = scrapedData.videos.length;
@@ -364,7 +626,11 @@ function updateUI() {
   renderLinks();
   renderText();
   
-  elements.status.textContent = `Last scraped: ${new Date().toLocaleTimeString()}`;
+  if (updateStatus) {
+    elements.status.textContent = scrapedAt
+      ? `Last scraped: ${new Date(scrapedAt).toLocaleTimeString()}`
+      : 'Ready';
+  }
 }
 
 // Fallback scrape function for scripting API
@@ -1769,6 +2035,7 @@ function toggleImageSelection(src, itemEl) {
     itemEl.classList.add('selected');
   }
   updateSelectionToolbar();
+  scheduleWorkspaceSave();
 }
 
 // Update selection toolbar visibility and count
@@ -1796,6 +2063,7 @@ function selectAllImages() {
     }
   });
   updateSelectionToolbar();
+  scheduleWorkspaceSave();
 }
 
 // Clear selection
@@ -1806,6 +2074,7 @@ function clearSelection() {
   });
   updateSelectionToolbar();
   renderDownloadPanel();
+  scheduleWorkspaceSave();
 }
 
 // Open download panel
@@ -1865,6 +2134,7 @@ function renderDownloadPanel() {
       if (gridItem) gridItem.classList.remove('selected');
       updateSelectionToolbar();
       renderDownloadPanel();
+      scheduleWorkspaceSave();
     });
     item.appendChild(removeBtn);
 
@@ -1929,10 +2199,13 @@ function openSettings() {
 }
 
 function loadSettings() {
-  chrome.storage.local.get('scraperSettings', (data) => {
-    if (data.scraperSettings) {
-      settings = { ...settings, ...data.scraperSettings };
-    }
+  return new Promise(resolve => {
+    chrome.storage.local.get('scraperSettings', (data) => {
+      if (data.scraperSettings) {
+        settings = { ...settings, ...data.scraperSettings };
+      }
+      resolve();
+    });
   });
 }
 

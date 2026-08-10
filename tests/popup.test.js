@@ -18,7 +18,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace };`, context);
   return context.popupHelpers;
 }
 
@@ -530,5 +530,99 @@ describe('Scraper settings injection', () => {
       'https://example.com/nav',
       'https://example.com/content'
     ]);
+  });
+});
+
+
+describe('Per-tab session workspace cache', () => {
+  const sampleData = {
+    images: [{ src: 'https://example.com/hero.jpg', alt: 'Hero' }],
+    videos: [{ url: 'https://example.com/movie.mp4' }],
+    audios: [{ url: 'https://example.com/audio.mp3' }],
+    links: [{ href: 'https://example.com/about', text: 'About' }],
+    text: 'Page text'
+  };
+
+  test('creates a versioned key only for valid Chrome tab IDs', () => {
+    const { getWorkspaceCacheKey } = loadPopupHelpers();
+
+    expect(getWorkspaceCacheKey(42)).toBe('page-scraper-workspace:v1:tab:42');
+    for (const invalid of [undefined, null, 0, -1, 1.5, '42']) {
+      expect(() => getWorkspaceCacheKey(invalid)).toThrow();
+    }
+  });
+
+  test('serializes and restores the complete workspace only for its exact tab', () => {
+    const { serializeWorkspace, normalizeWorkspace } = loadPopupHelpers();
+    const serialized = serializeWorkspace(42, {
+      scrapedData: sampleData,
+      scrapedAt: 1720000000000,
+      activeResultTab: 'links',
+      currentImageFilter: 'large',
+      imageSearch: 'hero',
+      linkSearch: 'about',
+      selectedImageUrls: ['https://example.com/hero.jpg', 'https://example.com/missing.jpg']
+    });
+
+    expect(serialized).toEqual(expect.objectContaining({
+      version: 1,
+      tabId: 42,
+      scrapedAt: 1720000000000,
+      activeResultTab: 'links',
+      currentImageFilter: 'large',
+      imageSearch: 'hero',
+      linkSearch: 'about'
+    }));
+    expect(normalizeWorkspace(serialized, 42)).toEqual(expect.objectContaining({
+      scrapedData: sampleData,
+      selectedImageUrls: ['https://example.com/hero.jpg']
+    }));
+    expect(normalizeWorkspace(serialized, 43)).toBeNull();
+  });
+
+  test('drops optional page text before structured results to meet a size budget', () => {
+    const { serializeWorkspace } = loadPopupHelpers();
+    const serialized = serializeWorkspace(7, {
+      scrapedData: { ...sampleData, text: 'x'.repeat(5000) },
+      scrapedAt: 1720000000000
+    }, 900);
+
+    expect(JSON.stringify(serialized).length).toBeLessThanOrEqual(900);
+    expect(serialized.scrapedData.text.length).toBeLessThan(5000);
+    expect(serialized.scrapedData.images).toEqual(sampleData.images);
+    expect(serialized.scrapedData.videos).toEqual(sampleData.videos);
+    expect(serialized.scrapedData.audios).toEqual(sampleData.audios);
+    expect(serialized.scrapedData.links).toEqual(sampleData.links);
+  });
+
+  test('rejects a budget too small for even the required workspace envelope', () => {
+    const { serializeWorkspace } = loadPopupHelpers();
+    expect(() => serializeWorkspace(7, { scrapedData: sampleData, scrapedAt: 1720000000000 }, 1)).toThrow(/size budget/i);
+  });
+
+  test.each([
+    null,
+    {},
+    { version: 2, tabId: 42 },
+    { version: 1, tabId: 42, scrapedData: { images: 'bad' } },
+    { version: 1, tabId: 42, scrapedData: {}, scrapedAt: 'yesterday' }
+  ])('rejects malformed cached workspace %p', (cached) => {
+    const { normalizeWorkspace } = loadPopupHelpers();
+    expect(normalizeWorkspace(cached, 42)).toBeNull();
+  });
+
+  test('wires session-only restore, persistence, and cleanup controls', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    const popupSource = fs.readFileSync(popupJsPath, 'utf8');
+    const backgroundSource = fs.readFileSync(backgroundJsPath, 'utf8');
+
+    expect(html).toMatch(/id="clearResultsBtn"[^>]*>[^<]*Clear results|id="clearResultsBtn"/);
+    expect(popupSource).toContain('chrome.storage.session');
+    expect(popupSource).toContain('restoreWorkspaceForCurrentTab');
+    expect(popupSource).toContain('scheduleWorkspaceSave');
+    expect(popupSource).toContain('Restored from this tab · scraped');
+    expect(popupSource).not.toMatch(/storage\.local.*workspace|workspace.*storage\.local/);
+    expect(backgroundSource).toContain('chrome.tabs.onRemoved.addListener');
+    expect(backgroundSource).toContain('chrome.storage.session.remove');
   });
 });
