@@ -925,3 +925,83 @@ this.createToastController = createToastController;`, context);
     expect(backgroundJs).toContain('await copyTextInTab(');
   });
 });
+
+
+describe('Task 7 keyboard accessibility contracts', () => {
+  test('results use the ARIA tabs pattern with linked hidden panels', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    expect(html).toMatch(/class="tab-list"[^>]*role="tablist"[^>]*aria-label=/);
+    for (const name of ['images', 'videos', 'audios', 'links', 'text']) {
+      expect(html).toMatch(new RegExp(`id="${name}TabButton"[^>]*role="tab"[^>]*aria-controls="${name}Tab"`));
+      expect(html).toMatch(new RegExp(`id="${name}Tab"[^>]*role="tabpanel"[^>]*aria-labelledby="${name}TabButton"`));
+    }
+    expect(html).toMatch(/id="imagesTabButton"[^>]*aria-selected="true"[^>]*tabindex="0"/);
+    expect(html).toMatch(/id="videosTabButton"[^>]*aria-selected="false"[^>]*tabindex="-1"/);
+    expect(html).toMatch(/id="videosTab"[^>]*hidden/);
+  });
+
+  test('tab switching synchronizes selected, focusability, panels, and keyboard activation', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const switchSource = source.slice(source.indexOf('function switchTab('), source.indexOf('// Scrape page data'));
+    expect(switchSource).toContain("setAttribute('aria-selected'");
+    expect(switchSource).toContain("setAttribute('tabindex'");
+    expect(switchSource).toContain('.hidden =');
+    expect(source).toContain("case 'ArrowRight'");
+    expect(source).toContain("case 'ArrowLeft'");
+    expect(source).toContain("case 'Home'");
+    expect(source).toContain("case 'End'");
+    expect(source).toContain('.focus();');
+  });
+
+  test('icon controls and filters have accessible names and states', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    for (const id of ['detachBtn', 'sidebarBtn', 'settingsBtn', 'closePanelBtn']) {
+      expect(html).toMatch(new RegExp(`id="${id}"[^>]*aria-label=`));
+    }
+    expect(html).toMatch(/id="imageFilter"[^>]*aria-label=|<label[^>]*for="imageFilter"/);
+    expect(html).toMatch(/id="linkFilter"[^>]*aria-label=|<label[^>]*for="linkFilter"/);
+    expect(html.match(/class="filter-chip[^>]*aria-pressed=/g)).toHaveLength(5);
+    expect(html).toMatch(/<svg[^>]*aria-hidden="true"[^>]*focusable="false"/);
+  });
+
+  test('settings and downloads are labelled native dialogs with static settings inputs', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    expect(html).toMatch(/<dialog[^>]*id="settingsDialog"[^>]*aria-labelledby="settingsTitle"/);
+    expect(html).toMatch(/<dialog[^>]*id="downloadPanel"[^>]*aria-labelledby="downloadPanelTitle"/);
+    expect(html).toMatch(/<label[^>]*for="minWidth"/);
+    expect(html).toMatch(/id="minWidth"[^>]*min="1"/);
+    expect(html).toMatch(/id="minHeight"[^>]*min="1"/);
+    expect(html).not.toContain('modal.innerHTML');
+  });
+
+  test('dialog focus controller opens modally, focuses, closes, and restores focus', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const start = source.indexOf('function createDialogController(');
+    const end = source.indexOf('const toastController', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    if (start < 0 || end < 0) return;
+    const context = {};
+    vm.runInNewContext(`${source.slice(start, end)}\nthis.createDialogController = createDialogController;`, context);
+    const trigger = { focus: jest.fn() };
+    const first = { focus: jest.fn() };
+    const dialog = { open: false, showModal: jest.fn(function () { this.open = true; }), close: jest.fn(function () { this.open = false; }) };
+    const controller = context.createDialogController(dialog, () => first);
+    controller.open(trigger);
+    expect(dialog.showModal).toHaveBeenCalled();
+    expect(first.focus).toHaveBeenCalled();
+    controller.close();
+    expect(dialog.close).toHaveBeenCalled();
+    expect(trigger.focus).toHaveBeenCalled();
+  });
+
+  test('dynamic media and selection controls are keyboard-native and avoid URL selectors', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    expect(source).toContain("checkbox.type = 'button'");
+    expect(source).toContain("checkbox.setAttribute('aria-pressed'");
+    expect(source).toContain("document.createElement('a')");
+    expect(source).toContain("playBtn.setAttribute('aria-label'");
+    expect(source).toContain("copyBtn.setAttribute('aria-label', 'Copy audio URL')");
+    expect(source).toContain("removeBtn.setAttribute('aria-label'");
+    expect(source).not.toMatch(/querySelector\(`\.image-item img\[src="\$\{src\}"\]`\)/);
+  });
+});

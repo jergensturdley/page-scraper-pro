@@ -480,11 +480,40 @@ const elements = {
   imageFilter: document.getElementById('imageFilter'),
   linkFilter: document.getElementById('linkFilter'),
   filterChips: document.querySelectorAll('.filter-chip'),
-  detachBtn: document.getElementById('detachBtn')
+  detachBtn: document.getElementById('detachBtn'),
+  settingsDialog: document.getElementById('settingsDialog'),
+  settingsForm: document.getElementById('settingsForm'),
+  closeSettingsBtn: document.getElementById('closeSettingsBtn'),
+  downloadPanel: document.getElementById('downloadPanel')
 };
+
+function createDialogController(dialog, getInitialFocus) {
+  let returnFocus = null;
+
+  return {
+    open(trigger) {
+      if (!dialog || dialog.open) return;
+      returnFocus = trigger || null;
+      dialog.showModal();
+      const initialFocus = getInitialFocus ? getInitialFocus() : null;
+      if (initialFocus && typeof initialFocus.focus === 'function') initialFocus.focus();
+    },
+    close() {
+      if (dialog && dialog.open) dialog.close();
+      if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+      returnFocus = null;
+    },
+    restoreFocus() {
+      if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+      returnFocus = null;
+    }
+  };
+}
 
 const toastController = createToastController(elements.toast);
 const workspaceTabController = createWorkspaceTabController(cancelPendingWorkspaceSave);
+const settingsDialogController = createDialogController(elements.settingsDialog, () => elements.closeSettingsBtn);
+const downloadDialogController = createDialogController(elements.downloadPanel, () => document.getElementById('closePanelBtn'));
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -548,9 +577,15 @@ function resetInMemoryWorkspace(status = 'Ready') {
   selectedImages.clear();
   if (elements.imageFilter) elements.imageFilter.value = '';
   if (elements.linkFilter) elements.linkFilter.value = '';
-  elements.filterChips.forEach(chip => chip.classList.remove('active'));
+  elements.filterChips.forEach(chip => {
+    chip.classList.remove('active');
+    chip.setAttribute('aria-pressed', 'false');
+  });
   const contentChip = document.querySelector('.filter-chip[data-filter="content"]');
-  if (contentChip) contentChip.classList.add('active');
+  if (contentChip) {
+    contentChip.classList.add('active');
+    contentChip.setAttribute('aria-pressed', 'true');
+  }
   switchTab('images', false);
   updateUI();
   updateSelectionToolbar();
@@ -700,7 +735,11 @@ async function restoreWorkspaceForCurrentTab(token = workspaceTabController.curr
     selectedImages = new Set(workspace.selectedImageUrls);
     if (elements.imageFilter) elements.imageFilter.value = workspace.imageSearch;
     if (elements.linkFilter) elements.linkFilter.value = workspace.linkSearch;
-    elements.filterChips.forEach(chip => chip.classList.toggle('active', chip.dataset.filter === currentImageFilter));
+    elements.filterChips.forEach(chip => {
+      const selected = chip.dataset.filter === currentImageFilter;
+      chip.classList.toggle('active', selected);
+      chip.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    });
     switchTab(activeResultTab, false);
     updateUI();
     updateSelectionToolbar();
@@ -742,6 +781,10 @@ function setupEventListeners() {
   elements.exportArchive.addEventListener('click', exportArchive);
   elements.copyImageUrls.addEventListener('click', copyImageURLs);
   elements.settingsBtn.addEventListener('click', openSettings);
+  if (elements.settingsForm) elements.settingsForm.addEventListener('submit', saveSettings);
+  if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', () => settingsDialogController.close());
+  setupDialogDismissal(elements.settingsDialog, settingsDialogController);
+  setupDialogDismissal(elements.downloadPanel, downloadDialogController);
   if (elements.sidebarBtn) {
     elements.sidebarBtn.addEventListener('click', openInSidebar);
   }
@@ -752,6 +795,7 @@ function setupEventListeners() {
   // Tab switching
   elements.tabBtns.forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    btn.addEventListener('keydown', handleTabKeydown);
   });
   
   // Copy buttons for each tab
@@ -777,8 +821,12 @@ function setupEventListeners() {
   elements.filterChips.forEach(chip => {
     chip.addEventListener('click', () => {
       // Update active state
-      elements.filterChips.forEach(c => c.classList.remove('active'));
+      elements.filterChips.forEach(c => {
+        c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
+      });
       chip.classList.add('active');
+      chip.setAttribute('aria-pressed', 'true');
       // Re-render with filter
       currentImageFilter = chip.dataset.filter;
       renderImages();
@@ -804,14 +852,56 @@ function setupEventListeners() {
 function switchTab(tabName, persist = true) {
   const nextTab = RESULT_TABS.has(tabName) ? tabName : 'images';
   activeResultTab = nextTab;
-  elements.tabBtns.forEach(btn => btn.classList.remove('active'));
-  document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
 
-  const tabBtn = document.querySelector(`[data-tab="${nextTab}"]`);
-  const tabPane = document.getElementById(`${nextTab}Tab`);
-  if (tabBtn) tabBtn.classList.add('active');
-  if (tabPane) tabPane.classList.add('active');
+  elements.tabBtns.forEach(btn => {
+    const selected = btn.dataset.tab === nextTab;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+    btn.setAttribute('tabindex', selected ? '0' : '-1');
+  });
+  document.querySelectorAll('.tab-pane').forEach(pane => {
+    const selected = pane.id === `${nextTab}Tab`;
+    pane.classList.toggle('active', selected);
+    pane.hidden = !selected;
+  });
   if (persist) scheduleWorkspaceSave();
+}
+
+function handleTabKeydown(event) {
+  const tabs = Array.from(elements.tabBtns);
+  const currentIndex = tabs.indexOf(event.currentTarget);
+  let nextIndex;
+  switch (event.key) {
+    case 'ArrowRight':
+      nextIndex = (currentIndex + 1) % tabs.length;
+      break;
+    case 'ArrowLeft':
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      break;
+    case 'Home':
+      nextIndex = 0;
+      break;
+    case 'End':
+      nextIndex = tabs.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  const nextTab = tabs[nextIndex];
+  switchTab(nextTab.dataset.tab);
+  nextTab.focus();
+}
+
+function setupDialogDismissal(dialog, controller) {
+  if (!dialog) return;
+  dialog.addEventListener('close', () => {
+    dialog.classList.remove('open');
+    controller.restoreFocus();
+  });
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) controller.close();
+  });
 }
 
 // Scrape page data
@@ -1199,7 +1289,7 @@ function renderImages() {
   if (images.length === 0) {
     elements.imagesContainer.innerHTML = `
       <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <svg aria-hidden="true" focusable="false" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
           <circle cx="8.5" cy="8.5" r="1.5"/>
           <polyline points="21 15 16 10 5 21"/>
@@ -1216,30 +1306,36 @@ function renderImages() {
   images.forEach((img, index) => {
     const item = document.createElement('div');
     item.className = 'image-item';
+    item.imageSource = img.src;
     if (selectedImages.has(img.src)) item.classList.add('selected');
 
-    const checkbox = document.createElement('div');
+    const accessibleName = img.alt || `Image ${index + 1}`;
+    const checkbox = document.createElement('button');
+    checkbox.type = 'button';
     checkbox.className = 'image-checkbox';
-    checkbox.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>';
-    checkbox.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleImageSelection(img.src, item);
-    });
+    checkbox.setAttribute('aria-label', `Select ${accessibleName}`);
+    checkbox.setAttribute('aria-pressed', selectedImages.has(img.src) ? 'true' : 'false');
+    checkbox.innerHTML = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>';
+    checkbox.addEventListener('click', () => toggleImageSelection(img.src, item));
     item.appendChild(checkbox);
 
+    const safeImageUrl = normalizeHttpUrl(img.src);
+    const openLink = document.createElement('a');
+    openLink.className = 'image-open-link';
+    openLink.target = '_blank';
+    openLink.rel = 'noopener';
+    openLink.setAttribute('aria-label', `Open ${accessibleName}`);
+    if (safeImageUrl) {
+      openLink.href = safeImageUrl;
+    } else {
+      openLink.setAttribute('aria-disabled', 'true');
+    }
     const imgEl = document.createElement('img');
-    imgEl.src = img.src;
-    imgEl.alt = img.alt || 'Image ' + (index + 1);
+    if (safeImageUrl) imgEl.src = safeImageUrl;
+    imgEl.alt = accessibleName;
     imgEl.loading = 'lazy';
-    imgEl.addEventListener('click', (e) => {
-      if (e.shiftKey || selectedImages.size > 0) {
-        e.preventDefault();
-        toggleImageSelection(img.src, item);
-      } else {
-        window.open(img.src, '_blank');
-      }
-    });
-    item.appendChild(imgEl);
+    openLink.appendChild(imgEl);
+    item.appendChild(openLink);
 
     const overlay = document.createElement('div');
     overlay.className = 'image-overlay';
@@ -1273,7 +1369,7 @@ function renderLinks() {
   if (links.length === 0) {
     elements.linksContainer.innerHTML = `
       <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <svg aria-hidden="true" focusable="false" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <path d="M10 6H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>
           <path d="M14 10l8-8"/>
           <path d="M14 2v6h6"/>
@@ -1288,8 +1384,16 @@ function renderLinks() {
   list.className = 'links-list';
   
   links.forEach(link => {
-    const item = document.createElement('div');
+    const item = document.createElement('a');
     item.className = 'link-item';
+    const safeLinkUrl = normalizeHttpUrl(link.href);
+    if (safeLinkUrl) {
+      item.href = safeLinkUrl;
+      item.target = '_blank';
+      item.rel = 'noopener';
+    } else {
+      item.setAttribute('aria-disabled', 'true');
+    }
 
     const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     icon.classList.add('link-icon');
@@ -1299,6 +1403,8 @@ function renderLinks() {
     icon.setAttribute('fill', 'none');
     icon.setAttribute('stroke', 'currentColor');
     icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('focusable', 'false');
     icon.innerHTML = `
       <path d="M10 6H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>
       <path d="M14 10l8-8"/>
@@ -1312,7 +1418,6 @@ function renderLinks() {
     textSpan.textContent = link.text || link.href;
     item.appendChild(textSpan);
 
-    item.addEventListener('click', () => window.open(link.href, '_blank'));
     list.appendChild(item);
   });
   
@@ -1459,7 +1564,7 @@ function renderAudios() {
   if (scrapedData.audios.length === 0) {
     elements.audiosContainer.innerHTML = `
       <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <svg aria-hidden="true" focusable="false" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <path d="M9 18V5l12-2v13"/>
           <circle cx="6" cy="18" r="3"/>
           <circle cx="18" cy="16" r="3"/>
@@ -1485,6 +1590,8 @@ function renderAudios() {
     icon.setAttribute('fill', 'none');
     icon.setAttribute('stroke', 'currentColor');
     icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('focusable', 'false');
     icon.innerHTML = `
       <path d="M9 18V5l12-2v13"/>
       <circle cx="6" cy="18" r="3"/>
@@ -1517,8 +1624,10 @@ function renderAudios() {
 
     const playBtn = document.createElement('button');
     playBtn.className = 'audio-play-btn';
+    playBtn.type = 'button';
+    playBtn.setAttribute('aria-label', `Play audio ${index + 1}`);
     playBtn.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <svg aria-hidden="true" focusable="false" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
         <polygon points="5 3 19 12 5 21 5 3"/>
       </svg>
     `;
@@ -1529,8 +1638,10 @@ function renderAudios() {
 
     const copyBtn = document.createElement('button');
     copyBtn.className = 'copy-audio-btn';
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy audio URL');
     copyBtn.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg aria-hidden="true" focusable="false" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
       </svg>
@@ -1561,7 +1672,7 @@ function renderText() {
   if (!scrapedData.text || scrapedData.text.trim().length === 0) {
     elements.textContainer.innerHTML = `
       <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+        <svg aria-hidden="true" focusable="false" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <line x1="17" y1="10" x2="3" y2="10"/>
           <line x1="21" y1="6" x2="3" y2="6"/>
           <line x1="21" y1="14" x2="3" y2="14"/>
@@ -2288,6 +2399,8 @@ function toggleImageSelection(src, itemEl) {
     selectedImages.add(src);
     itemEl.classList.add('selected');
   }
+  const selectionButton = itemEl.querySelector('.image-checkbox');
+  if (selectionButton) selectionButton.setAttribute('aria-pressed', selectedImages.has(src) ? 'true' : 'false');
   updateSelectionToolbar();
   scheduleWorkspaceSave();
 }
@@ -2310,10 +2423,11 @@ function updateSelectionToolbar() {
 function selectAllImages() {
   const items = document.querySelectorAll('#imagesContainer .image-item');
   items.forEach(item => {
-    const img = item.querySelector('img');
-    if (img && img.src) {
-      selectedImages.add(img.src);
+    if (item.imageSource) {
+      selectedImages.add(item.imageSource);
       item.classList.add('selected');
+      const selectionButton = item.querySelector('.image-checkbox');
+      if (selectionButton) selectionButton.setAttribute('aria-pressed', 'true');
     }
   });
   updateSelectionToolbar();
@@ -2325,6 +2439,8 @@ function clearSelection() {
   selectedImages.clear();
   document.querySelectorAll('#imagesContainer .image-item.selected').forEach(item => {
     item.classList.remove('selected');
+    const selectionButton = item.querySelector('.image-checkbox');
+    if (selectionButton) selectionButton.setAttribute('aria-pressed', 'false');
   });
   updateSelectionToolbar();
   renderDownloadPanel();
@@ -2337,13 +2453,17 @@ function openDownloadPanel() {
   if (panel) {
     panel.classList.add('open');
     renderDownloadPanel();
+    downloadDialogController.open(document.getElementById('openPanelBtn'));
   }
 }
 
 // Close download panel
 function closeDownloadPanel() {
   const panel = document.getElementById('downloadPanel');
-  if (panel) panel.classList.remove('open');
+  if (panel) {
+    panel.classList.remove('open');
+    downloadDialogController.close();
+  }
 }
 
 // Render download panel list
@@ -2364,6 +2484,7 @@ function renderDownloadPanel() {
     const thumb = document.createElement('img');
     thumb.className = 'download-item-thumb';
     thumb.src = src;
+    thumb.alt = '';
     thumb.loading = 'lazy';
     item.appendChild(thumb);
 
@@ -2381,11 +2502,18 @@ function renderDownloadPanel() {
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'download-item-remove';
-    removeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    removeBtn.type = 'button';
+    removeBtn.setAttribute('aria-label', `Remove ${name.textContent} from downloads`);
+    removeBtn.innerHTML = '<svg aria-hidden="true" focusable="false" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
     removeBtn.addEventListener('click', () => {
       selectedImages.delete(src);
-      const gridItem = document.querySelector(`.image-item img[src="${src}"]`)?.closest('.image-item');
-      if (gridItem) gridItem.classList.remove('selected');
+      const gridItem = Array.from(document.querySelectorAll('#imagesContainer .image-item'))
+        .find(candidate => candidate.imageSource === src);
+      if (gridItem) {
+        gridItem.classList.remove('selected');
+        const selectionButton = gridItem.querySelector('.image-checkbox');
+        if (selectionButton) selectionButton.setAttribute('aria-pressed', 'false');
+      }
       updateSelectionToolbar();
       renderDownloadPanel();
       scheduleWorkspaceSave();
@@ -2414,42 +2542,15 @@ async function downloadSelectedImages() {
 }
 
 function openSettings() {
-  if (document.querySelector('.settings-modal')) return;
-
-  const modal = document.createElement('div');
-  modal.className = 'settings-modal';
-  modal.innerHTML = `
-    <div class="settings-content">
-      <div class="settings-header">
-        <h2>Settings</h2>
-        <button class="close-settings">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18"/>
-            <line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
-      <div class="settings-option">
-        <label>
-          <input type="checkbox" id="minSizeCheck" ${settings.minSize ? 'checked' : ''}>
-          Filter small images (min size)
-        </label>
-        <input type="number" id="minWidth" placeholder="Min width (px)" value="${settings.minWidth || 100}">
-        <input type="number" id="minHeight" placeholder="Min height (px)" value="${settings.minHeight || 100}">
-      </div>
-      <div class="settings-option">
-        <label>
-          <input type="checkbox" id="excludeNav" ${settings.excludeNav ? 'checked' : ''}>
-          Exclude navigation links
-        </label>
-      </div>
-      <button class="btn btn-primary save-settings-btn" style="width: 100%; margin-top: 10px;">Save Settings</button>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  modal.querySelector('.close-settings').addEventListener('click', () => modal.remove());
-  modal.querySelector('.save-settings-btn').addEventListener('click', saveSettings);
+  const minSizeCheck = document.getElementById('minSizeCheck');
+  const minWidth = document.getElementById('minWidth');
+  const minHeight = document.getElementById('minHeight');
+  const excludeNav = document.getElementById('excludeNav');
+  minSizeCheck.checked = settings.minSize;
+  minWidth.value = settings.minWidth || 100;
+  minHeight.value = settings.minHeight || 100;
+  excludeNav.checked = settings.excludeNav;
+  settingsDialogController.open(elements.settingsBtn);
 }
 
 function loadSettings() {
@@ -2463,15 +2564,22 @@ function loadSettings() {
   });
 }
 
-function saveSettings() {
+function saveSettings(event) {
+  if (event) event.preventDefault();
+  const minWidthInput = document.getElementById('minWidth');
+  const minHeightInput = document.getElementById('minHeight');
+  if (!minWidthInput.checkValidity() || !minHeightInput.checkValidity()) {
+    (minWidthInput.checkValidity() ? minHeightInput : minWidthInput).reportValidity();
+    return;
+  }
   settings = {
     minSize: document.getElementById('minSizeCheck').checked,
-    minWidth: parseInt(document.getElementById('minWidth').value) || 100,
-    minHeight: parseInt(document.getElementById('minHeight').value) || 100,
+    minWidth: Math.max(1, parseInt(minWidthInput.value, 10)),
+    minHeight: Math.max(1, parseInt(minHeightInput.value, 10)),
     excludeNav: document.getElementById('excludeNav').checked
   };
-  
+
   chrome.storage.local.set({ scraperSettings: settings });
   showToast('Settings saved!');
-  document.querySelector('.settings-modal').remove();
+  settingsDialogController.close();
 }
