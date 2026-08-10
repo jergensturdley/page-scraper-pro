@@ -948,8 +948,15 @@ body.sidebar-mode {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   z-index: 1000;
-  animation: toastIn 0.2s ease;
   font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.toast.visible {
+  opacity: 1;
+  animation: toastIn 0.2s ease;
 }
 
 @keyframes toastIn {

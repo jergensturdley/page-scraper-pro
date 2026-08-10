@@ -838,15 +838,73 @@ describe('Task 6 operation state and clipboard reporting contracts', () => {
     expect(updateFunction).not.toContain('elements.status');
   });
 
-  test('toast announcements reuse one persistent region', () => {
+  test('toast announcements stay in the accessibility tree and reuse one region', () => {
+    const html = fs.readFileSync(popupHtmlPath, 'utf8');
+    const styles = fs.readFileSync(stylesPath, 'utf8');
     const popupJs = fs.readFileSync(popupJsPath, 'utf8');
     const toastFunction = popupJs.slice(
       popupJs.indexOf('function showToast('),
       popupJs.indexOf('// Detect if running as a side panel')
     );
-    expect(toastFunction).toContain('elements.toast.textContent = message;');
+
+    expect(html).not.toMatch(/id="toast"[^>]*\shidden(?:\s|>)/);
+    expect(styles).toContain('.toast.visible');
+    expect(toastFunction).toContain('toastController.show(message);');
     expect(toastFunction).not.toContain("document.createElement('div')");
-    expect(toastFunction).not.toContain('document.body.appendChild');
+    expect(toastFunction).not.toContain('.hidden');
+  });
+
+  test('toast controller ignores stale callbacks and reset clears presentation', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function createToastController(');
+    const end = popupJs.indexOf('// DOM Elements', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    if (start < 0 || end < 0) return;
+
+    const context = {};
+    vm.runInNewContext(`${popupJs.slice(start, end)}
+this.createToastController = createToastController;`, context);
+    const queued = [];
+    const timers = new Map();
+    let nextTimer = 0;
+    const element = {
+      textContent: '',
+      classList: {
+        values: new Set(),
+        add(value) { this.values.add(value); },
+        remove(value) { this.values.delete(value); },
+        contains(value) { return this.values.has(value); }
+      }
+    };
+    const controller = context.createToastController(element, {
+      queue: callback => queued.push(callback),
+      setTimer: callback => { const id = ++nextTimer; timers.set(id, callback); return id; },
+      clearTimer: id => timers.delete(id)
+    });
+
+    controller.show('old tab');
+    const staleAnnouncement = queued.shift();
+    const staleDismissal = [...timers.values()][0];
+    controller.reset();
+    controller.show('new tab');
+    queued.shift()();
+    staleAnnouncement();
+    staleDismissal();
+
+    expect(element.textContent).toBe('new tab');
+    expect(element.classList.contains('visible')).toBe(true);
+    controller.reset();
+    expect(element.textContent).toBe('');
+    expect(element.classList.contains('visible')).toBe(false);
+  });
+
+  test('workspace resets also reset pending toast feedback', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const resetFunction = popupJs.slice(
+      popupJs.indexOf('function resetInMemoryWorkspace'),
+      popupJs.indexOf('async function handleActiveTabChanged')
+    );
+    expect(resetFunction).toContain('toastController.reset();');
   });
 
   test('content clipboard listener reports asynchronous success and failure', () => {

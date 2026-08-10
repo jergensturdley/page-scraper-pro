@@ -29,7 +29,6 @@ let scrapedAt = null;
 let activeResultTab = 'images';
 let workspaceSaveTimer = null;
 let workspaceStorageQueue = Promise.resolve();
-let toastTimer = null;
 
 function getVideoProviderId(url) {
   try {
@@ -330,6 +329,41 @@ function createWorkspaceTabController(cancelPendingSave) {
   };
 }
 
+function createToastController(element, options = {}) {
+  const queue = typeof options.queue === 'function' ? options.queue : queueMicrotask;
+  const setTimer = typeof options.setTimer === 'function' ? options.setTimer : setTimeout;
+  const clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : clearTimeout;
+  let timerId = null;
+  let generation = 0;
+
+  function reset() {
+    generation += 1;
+    if (timerId !== null) clearTimer(timerId);
+    timerId = null;
+    element.textContent = '';
+    element.classList.remove('visible');
+  }
+
+  function show(message) {
+    generation += 1;
+    const currentGeneration = generation;
+    if (timerId !== null) clearTimer(timerId);
+    element.classList.add('visible');
+    element.textContent = '';
+    queue(() => {
+      if (generation === currentGeneration) element.textContent = message;
+    });
+    timerId = setTimer(() => {
+      if (generation !== currentGeneration) return;
+      timerId = null;
+      element.textContent = '';
+      element.classList.remove('visible');
+    }, 3000);
+  }
+
+  return { show, reset };
+}
+
 function classifyImageCandidate(candidate) {
   const value = candidate && typeof candidate === 'object' ? candidate : {};
   const context = value.context && typeof value.context === 'object' ? value.context : {};
@@ -449,6 +483,7 @@ const elements = {
   detachBtn: document.getElementById('detachBtn')
 };
 
+const toastController = createToastController(elements.toast);
 const workspaceTabController = createWorkspaceTabController(cancelPendingWorkspaceSave);
 
 // Initialize
@@ -505,6 +540,7 @@ async function getCurrentTab() {
 }
 
 function resetInMemoryWorkspace(status = 'Ready') {
+  toastController.reset();
   scrapedData = { images: [], videos: [], audios: [], links: [], text: '' };
   scrapedAt = null;
   activeResultTab = 'images';
@@ -2174,15 +2210,7 @@ function calculateCRC32(data) {
 
 // Show toast notification
 function showToast(message) {
-  if (!elements.toast) return;
-  if (toastTimer) clearTimeout(toastTimer);
-  elements.toast.textContent = message;
-  elements.toast.hidden = false;
-  toastTimer = setTimeout(() => {
-    elements.toast.hidden = true;
-    elements.toast.textContent = '';
-    toastTimer = null;
-  }, 3000);
+  toastController.show(message);
 }
 
 // Detect if running as a side panel vs popup and apply appropriate mode
