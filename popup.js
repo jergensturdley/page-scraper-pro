@@ -105,6 +105,74 @@ function normalizeHttpUrl(value) {
   }
 }
 
+async function copyTextWithFeedback(value, successMessage, failureMessage, deps = {
+  writeText: text => navigator.clipboard.writeText(text),
+  notify: showToast,
+  reportError: console.error
+}) {
+  try {
+    await deps.writeText(value);
+    deps.notify(successMessage);
+    return true;
+  } catch (error) {
+    deps.reportError('Clipboard write failed:', error);
+    deps.notify(failureMessage);
+    return false;
+  }
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, response => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+async function requestZipExport(images, deps = {
+  sendMessage: sendRuntimeMessage,
+  notify: showToast,
+  reportError: console.error
+}) {
+  const entries = images.map(image => ({
+    url: normalizeHttpUrl(image?.src),
+    name: typeof image?.alt === 'string' && image.alt.trim() ? image.alt.trim().replace(/[^a-z0-9._-]/gi, '_').substring(0, 100) || 'image' : 'image'
+  })).filter(entry => entry.url);
+
+  if (entries.length === 0) {
+    const result = { success: false, error: 'No valid image URLs to archive' };
+    deps.notify('ZIP preparation failed: no valid image URLs.');
+    return result;
+  }
+
+  deps.notify(`Preparing ZIP for ${entries.length} image${entries.length === 1 ? '' : 's'}...`);
+  try {
+    const response = await deps.sendMessage({
+      action: 'createZipFromUrls',
+      urls: entries.map(entry => entry.url),
+      names: entries.map(entry => entry.name),
+      count: entries.length
+    });
+    if (response?.success === true) return response;
+    if (response?.fallback === true) {
+      deps.notify('ZIP unavailable; individual downloads started.');
+      return response;
+    }
+    const message = response?.error || 'background service did not confirm preparation';
+    deps.notify(`ZIP preparation failed: ${message}`);
+    return response || { success: false, error: message };
+  } catch (error) {
+    deps.reportError('ZIP preparation failed:', error);
+    deps.notify(`ZIP preparation failed: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+}
+
 const MAX_IMAGE_DATA_URL_LENGTH = 50000;
 
 function normalizeImageUrl(value) {
@@ -1551,9 +1619,9 @@ function renderVideos() {
     copyBtn.type = 'button';
     copyBtn.setAttribute('aria-label', 'Copy video URL');
     copyBtn.textContent = 'Copy';
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(rawVideoUrl);
-      showToast('Video URL copied!');
+    copyBtn.disabled = !videoUrl;
+    copyBtn.addEventListener('click', async () => {
+      await copyTextWithFeedback(videoUrl, 'Video URL copied!', 'Could not copy video URL');
     });
 
     let videoPreviewEl = null;
@@ -1643,6 +1711,7 @@ function renderAudios() {
   list.className = 'audio-list';
   
   scrapedData.audios.forEach((audio, index) => {
+    const audioUrl = normalizeHttpUrl(audio.src);
     const item = document.createElement('div');
     item.className = 'audio-item';
 
@@ -1710,9 +1779,9 @@ function renderAudios() {
         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
       </svg>
     `;
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(audio.src);
-      showToast('Audio URL copied!');
+    copyBtn.disabled = !audioUrl;
+    copyBtn.addEventListener('click', async () => {
+      await copyTextWithFeedback(audioUrl, 'Audio URL copied!', 'Could not copy audio URL');
     });
 
     actions.appendChild(playBtn);
@@ -1765,13 +1834,11 @@ async function copyAllData() {
     text: scrapedData.text
   };
   
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-    showToast('All data copied to clipboard!');
-  } catch (error) {
-    console.error('Copy error:', error);
-    showToast('Failed to copy data');
-  }
+  await copyTextWithFeedback(
+    JSON.stringify(data, null, 2),
+    'All data copied to clipboard!',
+    'Failed to copy data'
+  );
 }
 
 // Copy specific tab data
@@ -1796,13 +1863,11 @@ async function copyTabData(type) {
       break;
   }
   
-  try {
-    await navigator.clipboard.writeText(data);
-    showToast(`${type.charAt(0).toUpperCase() + type.slice(1)} copied to clipboard!`);
-  } catch (error) {
-    console.error('Copy error:', error);
-    showToast('Failed to copy data');
-  }
+  await copyTextWithFeedback(
+    data,
+    `${type.charAt(0).toUpperCase() + type.slice(1)} copied to clipboard!`,
+    'Failed to copy data'
+  );
 }
 
 // Export as JSON
@@ -1960,254 +2025,33 @@ async function downloadImagesIndividually() {
   }
 }
 
-// Export images as a single ZIP file
+// Export images as a single ZIP file through the packaged background ZIP path.
 async function exportArchive() {
   if (scrapedData.images.length === 0) {
     showToast('No images to download');
     return;
   }
 
-  showToast(`Fetching ${scrapedData.images.length} images for ZIP...`);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const baseUrl = tab?.url;
-
-  const files = [];
-  let failed = 0;
-  const BATCH_SIZE = 5;
-
-  async function fetchImageEntry(img, index) {
-    let imageUrl = img.src;
-    if (!imageUrl) {
-      failed++;
-      return;
-    }
-
-    if (!imageUrl.startsWith('http') && !imageUrl.startsWith('data:') && baseUrl) {
-      try {
-        imageUrl = new URL(imageUrl, baseUrl).href;
-      } catch (e) {
-        failed++;
-        return;
-      }
-    }
-
-    if (imageUrl.includes('preview_image.jpg') || imageUrl.includes('blank.gif')) {
-      failed++;
-      return;
-    }
-
-    try {
-      const { bytes, mime } = await fetchImageAsBytes(imageUrl);
-      let ext = '.jpg';
-      const lowerUrl = imageUrl.toLowerCase();
-      if (lowerUrl.includes('.png') || mime === 'image/png') ext = '.png';
-      else if (lowerUrl.includes('.gif') || mime === 'image/gif') ext = '.gif';
-      else if (lowerUrl.includes('.webp') || mime === 'image/webp') ext = '.webp';
-      else if (lowerUrl.includes('.svg') || mime === 'image/svg+xml') ext = '.svg';
-      else if (lowerUrl.includes('.bmp') || mime === 'image/bmp') ext = '.bmp';
-
-      const filenameBase = img.alt ? sanitizeFilename(img.alt.substring(0, 50)) : `image-${index + 1}`;
-      const filename = `${filenameBase}${ext}`;
-      files.push({ name: filename, data: bytes, crc: calculateCRC32(bytes) });
-    } catch (e) {
-      console.warn('Failed to fetch image for ZIP:', imageUrl, e);
-      failed++;
-    }
-  }
-
-  for (let i = 0; i < scrapedData.images.length; i += BATCH_SIZE) {
-    const batch = scrapedData.images.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map((img, batchIndex) => fetchImageEntry(img, i + batchIndex)));
-    showToast(`Fetching images... ${Math.min(i + BATCH_SIZE, scrapedData.images.length)}/${scrapedData.images.length}`);
-  }
-
-  if (files.length === 0) {
-    showToast('Could not fetch any images for ZIP (CORS/network). Falling back to individual downloads.');
-    // Fallback: start individual downloads via background (more likely to succeed)
-    try {
-      for (let i = 0; i < scrapedData.images.length; i++) {
-        const img = scrapedData.images[i];
-        let imageUrl = img.src;
-        if (imageUrl && !imageUrl.startsWith('http') && !imageUrl.startsWith('data:') && baseUrl) {
-          try { imageUrl = new URL(imageUrl, baseUrl).href; } catch (e) { continue; }
-        }
-        const filename = img.alt ? `${sanitizeFilename(img.alt.substring(0,50))}.jpg` : `image-${i+1}.jpg`;
-        chrome.runtime.sendMessage({ action: 'downloadImage', url: imageUrl, filename });
-        await new Promise(r => setTimeout(r, 150));
-      }
-      showToast('Started individual downloads as fallback');
-    } catch (e) {
-      console.error('Fallback downloads failed:', e);
-      showToast('Fallback downloads failed');
-    }
-    return;
-  }
-
-  showToast(`Creating ZIP with ${files.length} images...`);
-
-  try {
-    const zipBlob = buildZip(files);
-    const blobUrl = URL.createObjectURL(zipBlob);
-    const dateStr = new Date().toISOString().slice(0, 10);
-    chrome.downloads.download({
-      url: blobUrl,
-      filename: `scraped-images-${dateStr}.zip`,
-      saveAs: false
-    }, (downloadId) => {
-      if (chrome.runtime.lastError) {
-        console.error('ZIP download failed:', chrome.runtime.lastError);
-        showToast('ZIP download failed: ' + chrome.runtime.lastError.message);
-        URL.revokeObjectURL(blobUrl);
-      } else {
-        showToast(`ZIP created with ${files.length} images!`);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-      }
-    });
-  } catch (error) {
-    console.error('ZIP creation failed:', error);
-    showToast('Error creating ZIP: ' + error.message);
-  }
-}
-
-function fetchImageAsBytes(url) {
-  return new Promise((resolve, reject) => {
-    if (!url) {
-      return reject(new Error('No URL provided'));
-    }
-
-    if (url.startsWith('data:')) {
-      const match = url.match(/^data:([^;]+);base64,(.+)$/);
-      if (!match) {
-        return reject(new Error('Invalid data URL'));
-      }
-      const mime = match[1];
-      const binary = atob(match[2]);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return resolve({ bytes, mime });
-    }
-
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url, true);
-    xhr.responseType = 'arraybuffer';
-    xhr.timeout = 15000;
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const mime = xhr.getResponseHeader('content-type') || 'image/jpeg';
-        resolve({ bytes: new Uint8Array(xhr.response), mime });
-      } else {
-        reject(new Error('HTTP ' + xhr.status));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('Network error'));
-    xhr.ontimeout = () => reject(new Error('Request timed out'));
-    xhr.send();
-  });
-}
-
-function buildZip(entries) {
-  const parts = [];
-  const offsets = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    offsets.push(offset);
-    const nameBytes = new TextEncoder().encode(entry.name);
-    const header = new Uint8Array(30);
-    const dv = new DataView(header.buffer);
-    dv.setUint32(0, 0x04034b50, true);
-    dv.setUint16(4, 20, true);
-    dv.setUint16(6, 0, true);
-    dv.setUint16(8, 0, true);
-    dv.setUint16(10, 0, true);
-    dv.setUint16(12, 0, true);
-    dv.setUint32(14, entry.crc, true);
-    dv.setUint32(18, entry.data.length, true);
-    dv.setUint32(22, entry.data.length, true);
-    dv.setUint16(26, nameBytes.length, true);
-    dv.setUint16(28, 0, true);
-
-    parts.push(header);
-    parts.push(nameBytes);
-    parts.push(entry.data);
-    offset += header.length + nameBytes.length + entry.data.length;
-  }
-
-  const cdStart = offset;
-  let cdSize = 0;
-
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const nameBytes = new TextEncoder().encode(entry.name);
-    const cdHeader = new Uint8Array(46);
-    const dv = new DataView(cdHeader.buffer);
-    dv.setUint32(0, 0x02014b50, true);
-    dv.setUint16(4, 20, true);
-    dv.setUint16(6, 20, true);
-    dv.setUint16(8, 0, true);
-    dv.setUint16(10, 0, true);
-    dv.setUint16(12, 0, true);
-    dv.setUint16(14, 0, true);
-    dv.setUint32(16, entry.crc, true);
-    dv.setUint32(20, entry.data.length, true);
-    dv.setUint32(24, entry.data.length, true);
-    dv.setUint16(28, nameBytes.length, true);
-    dv.setUint16(30, 0, true);
-    dv.setUint16(32, 0, true);
-    dv.setUint16(34, 0, true);
-    dv.setUint16(36, 0, true);
-    dv.setUint32(38, 0, true);
-    dv.setUint32(42, offsets[i], true);
-
-    parts.push(cdHeader);
-    parts.push(nameBytes);
-    offset += cdHeader.length + nameBytes.length;
-    cdSize += cdHeader.length + nameBytes.length;
-  }
-
-  const eocd = new Uint8Array(22);
-  const dv2 = new DataView(eocd.buffer);
-  dv2.setUint32(0, 0x06054b50, true);
-  dv2.setUint16(4, 0, true);
-  dv2.setUint16(6, 0, true);
-  dv2.setUint16(8, entries.length, true);
-  dv2.setUint16(10, entries.length, true);
-  dv2.setUint32(12, cdSize, true);
-  dv2.setUint32(16, cdStart, true);
-  dv2.setUint16(20, 0, true);
-
-  parts.push(eocd);
-
-  let totalSize = 0;
-  for (const part of parts) totalSize += part.length;
-  const zipBytes = new Uint8Array(totalSize);
-  let position = 0;
-  for (const part of parts) {
-    zipBytes.set(part, position);
-    position += part.length;
-  }
-
-  return new Blob([zipBytes], { type: 'application/zip' });
+  await requestZipExport(scrapedData.images);
 }
 
 // Copy all image URLs to clipboard
-function copyImageURLs() {
+async function copyImageURLs() {
   if (scrapedData.images.length === 0) {
     showToast('No images to copy');
     return;
   }
   
-  const urls = scrapedData.images.map(img => img.src).join('\n');
-  navigator.clipboard.writeText(urls).then(() => {
-    showToast(`${scrapedData.images.length} image URLs copied!`);
-  }).catch(err => {
-    console.error('Copy failed:', err);
-    showToast('Copy failed');
-  });
+  const urls = scrapedData.images.map(img => normalizeImageUrl(img.src)).filter(Boolean).join('\n');
+  if (!urls) {
+    showToast('No valid image URLs to copy');
+    return;
+  }
+  await copyTextWithFeedback(
+    urls,
+    `${scrapedData.images.length} image URLs copied!`,
+    'Failed to copy image URLs'
+  );
 }
 
 // Export images with option
@@ -2219,168 +2063,14 @@ async function exportWithImages() {
   
   const choice = confirm('Download individual images or create ZIP?\n\nOK = Individual download\nCancel = Create ZIP file');
   if (choice) {
-    downloadImagesIndividually();
+    await downloadImagesIndividually();
   } else {
-    // Create ZIP in-popup (more reliable and avoids many separate downloads)
-    exportArchive();
+    await exportArchive();
   }
-}
-
-// Export as ZIP using chrome.downloads API with background
-async function exportAsZip() {
-  if (scrapedData.images.length === 0) {
-    showToast('No images to archive');
-    return;
-  }
-  
-  showToast('Preparing image URLs for ZIP...');
-  
-  // Send to background for download
-  chrome.runtime.sendMessage({
-    action: 'createZipFromUrls',
-    urls: scrapedData.images.map(img => img.src),
-    names: scrapedData.images.map(img => img.alt || 'image'),
-    count: scrapedData.images.length
-  });
-  
-  showToast('Creating ZIP in background...');
 }
 
 function sanitizeFilename(name) {
   return name.replace(/[^a-z0-9._-]/gi, '_').substring(0, 100);
-}
-
-// Create a proper ZIP archive - simpler implementation
-async function createZipArchive(files) {
-  // Collect file data first
-  const entries = [];
-  for (const file of files) {
-    let filename = file.name;
-    const ext = file.ext || '.jpg';
-    if (!filename.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp|bmp)$/i)) {
-      filename = filename + ext;
-    }
-    
-    const data = await file.blob.arrayBuffer();
-    entries.push({
-      name: filename,
-      data: new Uint8Array(data),
-      crc: calculateCRC32(new Uint8Array(data))
-    });
-  }
-  
-  // Use a simpler approach - concatenate all parts
-  const parts = [];
-  
-  // Local file headers + data
-  const localHeaderOffsets = [];
-  let offset = 0;
-  
-  for (const entry of entries) {
-    localHeaderOffsets.push(offset);
-    
-    // 30-byte local header
-    const header = new Uint8Array(30);
-    const dv = new DataView(header.buffer);
-    dv.setUint32(0, 0x04034b50, true); // signature
-    dv.setUint16(4, 20, true); // version
-    dv.setUint16(6, 0, true); // flags
-    dv.setUint16(8, 0, true); // compression
-    dv.setUint16(10, 0, true); // mod time
-    dv.setUint16(12, 0, true); // mod date
-    dv.setUint32(14, entry.crc, true); // crc
-    dv.setUint32(18, entry.data.length, true); // compressed size
-    dv.setUint32(22, entry.data.length, true); // uncompressed size
-    dv.setUint16(26, entry.name.length, true); // name length
-    dv.setUint16(28, 0, true); // extra length
-    parts.push(header);
-    
-    // filename
-    const nameBytes = new TextEncoder().encode(entry.name);
-    parts.push(nameBytes);
-    
-    // data
-    parts.push(entry.data);
-    
-    offset += 30 + nameBytes.length + entry.data.length;
-  }
-  
-  const cdOffset = offset;
-  
-  // Central directory
-  let cdSize = 0;
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const nameBytes = new TextEncoder().encode(entry.name);
-    cdSize += 46 + nameBytes.length;
-    
-    const cdHeader = new Uint8Array(46);
-    const dv = new DataView(cdHeader.buffer);
-    dv.setUint32(0, 0x02014b50, true); // signature
-    dv.setUint16(4, 20, true); // version made by
-    dv.setUint16(6, 20, true); // version needed
-    dv.setUint16(8, 0, true); // flags
-    dv.setUint16(10, 0, true); // compression
-    dv.setUint16(12, 0, true); // mod time
-    dv.setUint16(14, 0, true); // mod date
-    dv.setUint32(16, entry.crc, true); // crc
-    dv.setUint32(20, entry.data.length, true); // compressed size
-    dv.setUint32(24, entry.data.length, true); // uncompressed size
-    dv.setUint16(28, nameBytes.length, true); // name length
-    dv.setUint16(30, 0, true); // extra length
-    dv.setUint16(32, 0, true); // comment length
-    dv.setUint16(34, 0, true); // disk number
-    dv.setUint16(36, 0, true); // internal attributes
-    dv.setUint32(40, 0, true); // external attributes
-    dv.setUint32(42, localHeaderOffsets[i], true); // relative offset
-    parts.push(cdHeader);
-    parts.push(nameBytes);
-  }
-  
-  // EOCD
-  const eocd = new Uint8Array(22);
-  const dv = new DataView(eocd.buffer);
-  dv.setUint32(0, 0x06054b50, true); // signature
-  dv.setUint16(4, 0, true); // disk number
-  dv.setUint16(6, 0, true); // disk with cd
-  dv.setUint16(8, entries.length, true); // entries on disk
-  dv.setUint16(10, entries.length, true); // total entries
-  dv.setUint32(12, cdSize, true); // cd size
-  dv.setUint32(16, cdOffset, true); // cd offset
-  dv.setUint16(20, 0, true); // comment length
-  parts.push(eocd);
-  
-  // Calculate total size
-  let totalSize = 0;
-  for (const p of parts) totalSize += p.length;
-  
-  // Concatenate
-  const result = new Uint8Array(totalSize);
-  let pos = 0;
-  for (const p of parts) {
-    result.set(p, pos);
-    pos += p.length;
-  }
-  
-  return new Blob([result], { type: 'application/zip' });
-}
-
-// Simple CRC32 calculation
-function calculateCRC32(data) {
-  const crcTable = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    crcTable[i] = c;
-  }
-  
-  let crc = 0xFFFFFFFF;
-  for (const byte of data) {
-    crc = crcTable[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
 // Show toast notification

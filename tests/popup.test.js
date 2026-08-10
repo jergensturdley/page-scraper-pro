@@ -19,7 +19,7 @@ function loadPopupHelpers() {
   const context = { URL };
 
   vm.runInNewContext(`${helperSource}
-this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController, normalizeSourceDocumentUrl, getWorkspaceEvictionKeys, setWorkspaceWithEviction, formatFilteredCount, getEmptyResultsMessage };`, context);
+this.popupHelpers = { getVideoProviderId, normalizeVideoUrl, buildExportData, classifyImageCandidate, getWorkspaceCacheKey, serializeWorkspace, normalizeWorkspace, createWorkspaceTabController, normalizeSourceDocumentUrl, getWorkspaceEvictionKeys, setWorkspaceWithEviction, formatFilteredCount, getEmptyResultsMessage, copyTextWithFeedback, requestZipExport };`, context);
   return context.popupHelpers;
 }
 
@@ -936,6 +936,156 @@ this.createToastController = createToastController;`, context);
   });
 });
 
+
+
+describe('Confirmed popup clipboard and ZIP actions', () => {
+  test('clipboard feedback waits for a resolved write', async () => {
+    const { copyTextWithFeedback } = loadPopupHelpers();
+    const events = [];
+    let resolveWrite;
+    const write = new Promise(resolve => { resolveWrite = resolve; });
+    const pending = copyTextWithFeedback('https://example.com/video.mp4', 'Video URL copied!', 'Could not copy video URL', {
+      writeText: value => { events.push(`write:${value}`); return write; },
+      notify: message => events.push(`toast:${message}`),
+      reportError: jest.fn()
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(['write:https://example.com/video.mp4']);
+    resolveWrite();
+    await expect(pending).resolves.toBe(true);
+    expect(events).toEqual(['write:https://example.com/video.mp4', 'toast:Video URL copied!']);
+  });
+
+  test('clipboard rejection is handled with truthful failure feedback', async () => {
+    const { copyTextWithFeedback } = loadPopupHelpers();
+    const notifications = [];
+    const error = new Error('permission denied');
+    const reportError = jest.fn();
+
+    await expect(copyTextWithFeedback('https://example.com/audio.mp3', 'Audio URL copied!', 'Could not copy audio URL', {
+      writeText: jest.fn().mockRejectedValue(error),
+      notify: message => notifications.push(message),
+      reportError
+    })).resolves.toBe(false);
+
+    expect(notifications).toEqual(['Could not copy audio URL']);
+    expect(reportError).toHaveBeenCalledWith('Clipboard write failed:', error);
+  });
+
+  test('video and audio URL copy controls use normalized values and disable invalid copies', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    const videoSource = source.slice(source.indexOf('function renderVideos()'), source.indexOf('// Render audios'));
+    const audioSource = source.slice(source.indexOf('function renderAudios()'), source.indexOf('// Render text'));
+
+    expect(videoSource).toContain('copyBtn.disabled = !videoUrl;');
+    expect(videoSource).toContain("await copyTextWithFeedback(videoUrl, 'Video URL copied!', 'Could not copy video URL');");
+    expect(audioSource).toContain('const audioUrl = normalizeHttpUrl(audio.src);');
+    expect(audioSource).toContain('copyBtn.disabled = !audioUrl;');
+    expect(audioSource).toContain("await copyTextWithFeedback(audioUrl, 'Audio URL copied!', 'Could not copy audio URL');");
+  });
+
+  test('ZIP UI sends normalized image URLs to the background and only reports preparation', async () => {
+    const { requestZipExport } = loadPopupHelpers();
+    const messages = [];
+    const notifications = [];
+
+    await expect(requestZipExport([
+      { src: 'https://example.com/a.png', alt: 'Hero' },
+      { src: 'javascript:alert(1)', alt: 'Unsafe' }
+    ], {
+      sendMessage: async message => { messages.push(message); return { success: true }; },
+      notify: message => notifications.push(message),
+      reportError: jest.fn()
+    })).resolves.toEqual({ success: true });
+
+    expect(messages).toEqual([{
+      action: 'createZipFromUrls',
+      urls: ['https://example.com/a.png'],
+      names: ['Hero'],
+      count: 1
+    }]);
+    expect(notifications).toEqual(['Preparing ZIP for 1 image...']);
+  });
+
+  test('ZIP UI surfaces background individual-download fallback', async () => {
+    const { requestZipExport } = loadPopupHelpers();
+    const notifications = [];
+
+    const result = await requestZipExport([{ src: 'https://example.com/a.png', alt: '' }], {
+      sendMessage: async () => ({ success: false, fallback: true }),
+      notify: message => notifications.push(message),
+      reportError: jest.fn()
+    });
+
+    expect(result).toEqual({ success: false, fallback: true });
+    expect(notifications).toEqual([
+      'Preparing ZIP for 1 image...',
+      'ZIP unavailable; individual downloads started.'
+    ]);
+  });
+
+  test('ZIP UI handles a rejected runtime request as preparation failure', async () => {
+    const { requestZipExport } = loadPopupHelpers();
+    const notifications = [];
+    const reportError = jest.fn();
+
+    const result = await requestZipExport([{ src: 'https://example.com/a.png', alt: 'A' }], {
+      sendMessage: async () => { throw new Error('service worker unavailable'); },
+      notify: message => notifications.push(message),
+      reportError
+    });
+
+    expect(result).toEqual({ success: false, error: 'service worker unavailable' });
+    expect(notifications).toEqual([
+      'Preparing ZIP for 1 image...',
+      'ZIP preparation failed: service worker unavailable'
+    ]);
+    expect(reportError).toHaveBeenCalled();
+  });
+
+  test('background ZIP creation returns explicit fallback and finalization failure results', async () => {
+    const source = fs.readFileSync(backgroundJsPath, 'utf8');
+    const start = source.indexOf('async function createZipFromUrls');
+    const end = source.indexOf('// Create ZIP from file objects', start);
+    const context = {};
+    vm.runInNewContext(`${source.slice(start, end)}
+this.createZipFromUrls = createZipFromUrls;`, context);
+    const notify = jest.fn();
+    const reportError = jest.fn();
+
+    await expect(context.createZipFromUrls(['https://example.com/a.png'], ['A'], {
+      ensureLibrary: async () => false,
+      notify,
+      reportError
+    })).resolves.toEqual({ success: false, fallback: true });
+
+    await expect(context.createZipFromUrls([], [], {
+      ensureLibrary: async () => true,
+      notify,
+      reportError,
+      createZip: () => ({ end: () => { throw new Error('finalize failed'); } }),
+      fetchUrl: jest.fn(),
+      createFile: jest.fn(),
+      downloadZip: jest.fn()
+    })).resolves.toEqual({ success: false, error: 'finalize failed' });
+  });
+
+  test('popup has no handwritten ZIP builder or duplicate ZIP export path', () => {
+    const source = fs.readFileSync(popupJsPath, 'utf8');
+    expect(source).not.toContain('function buildZip(');
+    expect(source).not.toContain('function fetchImageAsBytes(');
+    expect(source).not.toContain('function exportAsZip(');
+  });
+
+  test('background ZIP messages keep the response channel open and send the async result', () => {
+    const source = fs.readFileSync(backgroundJsPath, 'utf8');
+    const handler = source.match(/if \(request\.action === 'createZipFromUrls'\)[\s\S]*?return true;/);
+    expect(handler).not.toBeNull();
+    expect(handler[0]).toContain('createZipFromUrls(request.urls, request.names)');
+    expect(handler[0]).toContain('sendResponse');
+  });
+});
 
 describe('Task 7 keyboard accessibility contracts', () => {
   test('results use the ARIA tabs pattern with linked hidden panels', () => {

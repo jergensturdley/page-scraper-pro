@@ -250,7 +250,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   
   if (request.action === 'createZipFromUrls') {
     console.log('createZipFromUrls received, count:', request.count);
-    createZipFromUrls(request.urls, request.names);
+    createZipFromUrls(request.urls, request.names)
+      .then(sendResponse)
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
   }
   
   if (request.action === 'downloadImage') {
@@ -548,89 +551,113 @@ async function ensurePackagedZipLibrary(urls, names, dependencies) {
   }
 }
 
-// Create ZIP from URLs (fetch images and create ZIP) using fflate streaming
-async function createZipFromUrls(urls, names) {
-  console.log('createZipFromUrls streaming:', urls.length);
-  showNotification(`Fetching ${urls.length} images and streaming ZIP...`);
+// Create ZIP from URLs (fetch images and create ZIP) using packaged fflate streaming.
+async function createZipFromUrls(urls, names, deps = {
+  ensureLibrary: ensurePackagedZipLibrary,
+  notify: showNotification,
+  reportError: console.error,
+  fetchUrl: url => fetch(url, { mode: 'cors', credentials: 'omit' }),
+  createZip: () => new fflate.Zip(),
+  createFile: filename => new fflate.AsyncZipDeflate(filename, { level: 0 }),
+  downloadZip: (url, filename) => new Promise((resolve, reject) => {
+    chrome.downloads.download({ url, filename, saveAs: false }, id => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) reject(new Error(runtimeError.message));
+      else resolve(id);
+    });
+  })
+}) {
+  const safeUrls = Array.isArray(urls) ? urls : [];
+  const safeNames = Array.isArray(names) ? names : [];
+  console.log('createZipFromUrls streaming:', safeUrls.length);
+  deps.notify(`Fetching ${safeUrls.length} images and streaming ZIP...`);
 
-  // Load ZIP support only from the library packaged with the extension.
-  if (!await ensurePackagedZipLibrary(urls, names)) return;
-
-  // Create Zip stream
-  const chunks = [];
-  const zip = new fflate.Zip();
-  zip.ondata = (err, chunk, final) => {
-    if (err) {
-      console.error('fflate zip error', err);
-      return;
+  try {
+    if (!await deps.ensureLibrary(safeUrls, safeNames)) {
+      return { success: false, fallback: true };
     }
-    chunks.push(chunk);
-    if (final) {
-      const blob = new Blob(chunks, { type: 'application/zip' });
-      // Trigger download
-      const readerPromise = blob.arrayBuffer();
-      readerPromise.then(ab => {
-        const bytes = new Uint8Array(ab);
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        const dataUrl = 'data:application/zip;base64,' + btoa(binary);
-        const zipName = `scraped-images-${new Date().toISOString().slice(0,10)}.zip`;
-        chrome.downloads.download({ url: dataUrl, filename: zipName, saveAs: false }, id => {
-          if (chrome.runtime.lastError) {
-            console.error('Download failed', chrome.runtime.lastError);
-            showNotification('ZIP download failed: ' + chrome.runtime.lastError.message);
-          } else {
-            showNotification('ZIP download started: ' + zipName);
-          }
-        });
-      }).catch(err => {
-        console.error('Failed to read zip blob', err);
-      });
-    }
-  };
 
-  // For each URL, fetch and add to zip as an async stream deflate (no compression for images)
-  for (let i = 0; i < urls.length; i++) {
-    const url = urls[i];
-    const rawName = names[i] || `image-${i + 1}`;
-    if (!url || url.includes('preview_image.jpg') || url.includes('blank.gif')) {
-      continue;
+    const chunks = [];
+    const zip = deps.createZip();
+    let resolveCompletion;
+    const completion = new Promise(resolve => { resolveCompletion = resolve; });
+    let completed = false;
+    const finish = result => {
+      if (!completed) {
+        completed = true;
+        resolveCompletion(result);
+      }
+    };
+
+    zip.ondata = (error, chunk, final) => {
+      if (error) {
+        deps.reportError('fflate ZIP error:', error);
+        deps.notify('Error creating ZIP');
+        finish({ success: false, error: error.message || 'ZIP stream failed' });
+        return;
+      }
+      chunks.push(chunk);
+      if (!final) return;
+
+      (async () => {
+        try {
+          const blob = new Blob(chunks, { type: 'application/zip' });
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          let binary = '';
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          const dataUrl = 'data:application/zip;base64,' + btoa(binary);
+          const zipName = `scraped-images-${new Date().toISOString().slice(0, 10)}.zip`;
+          await deps.downloadZip(dataUrl, zipName);
+          deps.notify('ZIP download started: ' + zipName);
+          finish({ success: true });
+        } catch (error) {
+          deps.reportError('ZIP download failed:', error);
+          deps.notify('ZIP download failed: ' + error.message);
+          finish({ success: false, error: error.message });
+        }
+      })();
+    };
+
+    for (let i = 0; i < safeUrls.length; i++) {
+      const url = safeUrls[i];
+      const rawName = safeNames[i] || `image-${i + 1}`;
+      if (!url || url.includes('preview_image.jpg') || url.includes('blank.gif')) continue;
+
+      try {
+        const response = await deps.fetchUrl(url);
+        if (!response.ok) {
+          console.warn('Failed to fetch', url, response.status);
+          continue;
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        let ext = '.jpg';
+        const lower = url.toLowerCase();
+        if (lower.includes('.png')) ext = '.png';
+        else if (lower.includes('.gif')) ext = '.gif';
+        else if (lower.includes('.webp')) ext = '.webp';
+        else if (lower.includes('.svg')) ext = '.svg';
+
+        const filename = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(rawName) ? rawName : rawName + ext;
+        const streamFile = deps.createFile(filename);
+        zip.add(streamFile);
+        streamFile.push(bytes, true);
+      } catch (error) {
+        console.warn('Error fetching or adding to ZIP:', url, error);
+      }
     }
 
     try {
-      const resp = await fetch(url, { mode: 'cors', credentials: 'omit' });
-      if (!resp.ok) {
-        console.warn('Failed to fetch', url, resp.status);
-        continue;
-      }
-      const ab = await resp.arrayBuffer();
-      const bytes = new Uint8Array(ab);
-      // Determine filename extension
-      let ext = '.jpg';
-      const lower = url.toLowerCase();
-      if (lower.includes('.png')) ext = '.png';
-      else if (lower.includes('.gif')) ext = '.gif';
-      else if (lower.includes('.webp')) ext = '.webp';
-      else if (lower.includes('.svg')) ext = '.svg';
-
-      const filename = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(rawName) ? rawName : (rawName + ext);
-      // Use AsyncZipDeflate with level 0 (store) for already-compressed files
-      const streamFile = new fflate.AsyncZipDeflate(filename, { level: 0 });
-      zip.add(streamFile);
-      // Push file data and close the stream (true finalized)
-      streamFile.push(bytes, true);
-
-    } catch (e) {
-      console.warn('Error fetching or adding to zip:', url, e);
+      zip.end();
+    } catch (error) {
+      deps.reportError('Error finalizing ZIP:', error);
+      deps.notify('Error creating ZIP');
+      finish({ success: false, error: error.message });
     }
-  }
-
-  // Finalize ZIP
-  try {
-    zip.end();
-  } catch (e) {
-    console.error('Error finalizing zip', e);
-    showNotification('Error creating ZIP');
+    return await completion;
+  } catch (error) {
+    deps.reportError('Error creating ZIP:', error);
+    deps.notify('Error creating ZIP');
+    return { success: false, error: error.message };
   }
 }
 
