@@ -89,6 +89,49 @@ class TextRedactionTests(unittest.TestCase):
         text = "retry 1 / 2 after network_error"
         self.assertEqual(redact_text(text, home=self.home), text)
 
+    def test_known_root_filename_paths_preserve_all_review_suffixes(self):
+        cases = {
+            "failed /Volumes/Media/video.mp4: network_error":
+                "failed <redacted>: network_error",
+            "failed /Volumes/Media/video.mp4 — network_error":
+                "failed <redacted> — network_error",
+            "failed /Volumes/Media/video.mp4 retrying network_error":
+                "failed <redacted> retrying network_error",
+            "failed /Volumes/Media/video.mp4. network_error":
+                "failed <redacted>. network_error",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                redacted = redact_text(source, home=self.home)
+                self.assertEqual(redacted, expected)
+                self.assertNotIn("/Volumes/Media/video.mp4", redacted)
+                self.assertIn("network_error", redacted)
+
+    def test_quoted_path_redacts_only_inside_quotes(self):
+        source = 'failed "/Volumes/Secret Folder/private video.mp4": network_error'
+        redacted = redact_text(source, home=self.home)
+        self.assertEqual(redacted, 'failed "<redacted>": network_error')
+        self.assertNotIn("Secret Folder", redacted)
+        self.assertIn("network_error", redacted)
+
+    def test_unquoted_path_with_spaces_redacts_through_filename_extension(self):
+        source = (
+            "failed /Volumes/Secret Disk/private video.mp4 "
+            "retrying network_error"
+        )
+        redacted = redact_text(source, home=self.home)
+        self.assertEqual(redacted, "failed <redacted> retrying network_error")
+        self.assertNotIn("Secret Disk", redacted)
+        self.assertNotIn("private video.mp4", redacted)
+        self.assertIn("retrying network_error", redacted)
+
+    def test_extensionless_unquoted_path_stops_at_first_whitespace(self):
+        source = "failed /Volumes/private/cache retrying network_error"
+        redacted = redact_text(source, home=self.home)
+        self.assertEqual(redacted, "failed <redacted> retrying network_error")
+        self.assertNotIn("/Volumes/private/cache", redacted)
+        self.assertIn("retrying network_error", redacted)
+
     def test_home_paths_are_replaced_without_disclosing_filename(self):
         private_path = self.home / "Downloads" / "private-video.mp4"
         text = f"failed to move {private_path} during completion"

@@ -22,21 +22,31 @@ _HEADER_RE = re.compile(
     r"[^\r\n]*"
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
-_PATH_END = (
-    r"(?=$|[\r\n\"'<>]|[),;]"
-    r"|\s+(?:with|during|because|while|after|before|from|at|code|error)\b)"
+_ROOT_NAMES = (
+    r"(?:Users|Volumes|private|tmp|var|etc|Library|Applications|System|"
+    r"opt|usr|bin|sbin|dev|home)"
 )
-_FILESYSTEM_PATH_RE = re.compile(
-    r"(?<![a-zA-Z0-9_~:/])"
-    r"("
-    r"~/[^\r\n\"'<>]+?"
-    r"|file:/{1,3}[^\r\n\"'<>]*?"
-    r"|//(?:Users|Volumes|private|tmp|var|etc|Library|Applications|System|"
-    r"opt|usr|bin|sbin|dev|home)(?:/[^\r\n\"'<>]*?)?"
-    r"|/(?:Users|Volumes|private|tmp|var|etc|Library|Applications|System|"
-    r"opt|usr|bin|sbin|dev|home)(?:/[^\r\n\"'<>]*?)?"
-    r")"
-    + _PATH_END,
+_PATH_START = (
+    rf"(?:~/|file:/{{1,3}}|//{_ROOT_NAMES}(?:/|(?=$))|"
+    rf"/{_ROOT_NAMES}(?:/|(?=$)))"
+)
+_DOUBLE_QUOTED_PATH_RE = re.compile(
+    rf'"(?P<path>{_PATH_START}[^"\r\n]*)"', re.IGNORECASE
+)
+_SINGLE_QUOTED_PATH_RE = re.compile(
+    rf"'(?P<path>{_PATH_START}[^'\r\n]*)'", re.IGNORECASE
+)
+_UNQUOTED_EXTENSION_PATH_RE = re.compile(
+    rf"(?<![a-zA-Z0-9_~:/])"
+    rf"(?P<path>{_PATH_START}[^\r\n\"'<>]*?"
+    rf"\.(?:[a-z][a-z0-9]{{0,15}}|3gp|7z)"
+    rf"(?:\.[a-z][a-z0-9]{{0,15}})?)"
+    rf"(?=$|[\s:;,.!?—)\]])",
+    re.IGNORECASE,
+)
+_UNQUOTED_EXTENSIONLESS_PATH_RE = re.compile(
+    rf"(?<![a-zA-Z0-9_~:/])"
+    rf"(?P<path>{_PATH_START}[^\s\r\n\"'<>:;,.!?—)\]]+)",
     re.IGNORECASE,
 )
 _SENSITIVE_COMPONENTS = frozenset(
@@ -111,25 +121,32 @@ def _redact_embedded_url(match: re.Match[str]) -> str:
     return redact_url(candidate) + trailing
 
 
-def _redact_filesystem_path(match: re.Match[str]) -> str:
-    value = match.group(0)
-    if value.startswith("~/"):
+def _path_replacement(path: str) -> str:
+    if path.startswith("~/"):
         return "~/<redacted>"
-    if value.casefold().startswith("file:"):
+    if path.casefold().startswith("file:"):
         return "file:<redacted>"
     return _REDACTED
 
 
-def _redact_home_paths(value: str, home: Path) -> str:
+def _redact_quoted_path(match: re.Match[str]) -> str:
+    quote = match.group(0)[0]
+    return quote + _path_replacement(match.group("path")) + quote
+
+
+def _redact_unquoted_path(match: re.Match[str]) -> str:
+    return _path_replacement(match.group("path"))
+
+
+def _replace_home_prefix(value: str, home: Path) -> str:
     home_text = str(home)
     if not home_text or home_text == os.sep:
         return value
     pattern = re.compile(
-        re.escape(home_text)
-        + r"(?:/[^\r\n\"'<>]*?)?"
-        + _PATH_END
+        rf"(?<![a-zA-Z0-9_]){re.escape(home_text)}"
+        rf"(?=/|$|[\s:;,.!?—)\]])"
     )
-    return pattern.sub("~/<redacted>", value)
+    return pattern.sub("~", value)
 
 
 def redact_text(
@@ -150,8 +167,13 @@ def redact_text(
     private_home = home if home is not None else Path.home()
     if not isinstance(private_home, Path):
         raise TypeError("home must be a Path")
-    redacted = _redact_home_paths(redacted, private_home)
-    redacted = _FILESYSTEM_PATH_RE.sub(_redact_filesystem_path, redacted)
+    redacted = _replace_home_prefix(redacted, private_home)
+    redacted = _DOUBLE_QUOTED_PATH_RE.sub(_redact_quoted_path, redacted)
+    redacted = _SINGLE_QUOTED_PATH_RE.sub(_redact_quoted_path, redacted)
+    redacted = _UNQUOTED_EXTENSION_PATH_RE.sub(_redact_unquoted_path, redacted)
+    redacted = _UNQUOTED_EXTENSIONLESS_PATH_RE.sub(
+        _redact_unquoted_path, redacted
+    )
 
     if len(redacted) > max_length:
         redacted = redacted[: max_length - len(_TRUNCATED)] + _TRUNCATED
