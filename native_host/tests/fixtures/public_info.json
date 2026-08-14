@@ -1,0 +1,102 @@
+{
+  "media": {
+    "id": "public-001",
+    "webpage_url": "HTTPS://Media.Example/watch?v=public-001#player",
+    "title": "Synthetic Public Media",
+    "duration": 123.75,
+    "extractor": "synthetic",
+    "extractor_key": "Synthetic",
+    "thumbnail": "https://cdn.example/thumbnail.jpg#fragment",
+    "live_status": "not_live",
+    "subtitles": {
+      "es": [
+        {
+          "ext": "vtt",
+          "url": "https://cdn.example/sub-es.vtt"
+        }
+      ],
+      "en": [
+        {
+          "ext": "vtt",
+          "url": "https://cdn.example/sub-en.vtt"
+        }
+      ]
+    },
+    "formats": [
+      {
+        "format_id": "480-combined",
+        "height": 480,
+        "vcodec": "avc1.4d401f",
+        "acodec": "mp4a.40.2",
+        "url": "https://cdn.example/480.mp4",
+        "http_headers": {
+          "Authorization": "secret"
+        }
+      },
+      {
+        "format_id": "720-video",
+        "height": 720,
+        "vcodec": "avc1.64001f",
+        "acodec": "none",
+        "url": "https://cdn.example/720.mp4"
+      },
+      {
+        "format_id": "1080-video",
+        "height": 1080,
+        "vcodec": "avc1.640028",
+        "acodec": "none",
+        "url": "https://cdn.example/1080.mp4"
+      },
+      {
+        "format_id": "audio",
+        "vcodec": "none",
+        "acodec": "opus",
+        "url": "https://cdn.example/audio.webm"
+      }
+    ],
+    "description": "NOISY DESCRIPTION MUST NOT LEAK",
+    "comments": [
+      {
+        "text": "NOISY COMMENT"
+      }
+    ],
+    "http_headers": {
+      "Cookie": "session=secret"
+    },
+    "cookies": "session=secret",
+    "webpage": "<html>NOISY HTML</html>"
+  },
+  "playlist": {
+    "_type": "playlist",
+    "id": "playlist-001",
+    "webpage_url": "https://media.example/playlist?id=playlist-001",
+    "title": "Synthetic Public Playlist",
+    "extractor": "synthetic",
+    "entries": [
+      {
+        "id": "entry-1",
+        "title": "First entry",
+        "formats": [
+          {
+            "url": "https://cdn.example/one"
+          }
+        ]
+      },
+      {
+        "id": "entry-2",
+        "title": "Second entry",
+        "formats": [
+          {
+            "url": "https://cdn.example/two"
+          }
+        ]
+      }
+    ],
+    "description": "PLAYLIST DESCRIPTION MUST NOT LEAK",
+    "comments": [
+      {
+        "text": "NOISY"
+      }
+    ]
+  }
+}

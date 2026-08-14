@@ -129,6 +129,19 @@ def normalize_http_url(value: object) -> str:
     return normalized
 
 
+def validate_worker_job(value: object) -> dict[str, str]:
+    """Validate the single-line protocol accepted by an isolated worker."""
+    if not isinstance(value, dict):
+        raise ValueError("worker job must be an object")
+    _require_exact_keys(value, {"operation", "url"}, "worker job")
+    if value["operation"] != "analyze":
+        raise ValueError("unknown worker operation")
+    return {
+        "operation": "analyze",
+        "url": normalize_http_url(value["url"]),
+    }
+
+
 def validate_request_id(value: object) -> str:
     """Return a request identifier only when it matches the wire format."""
     if not isinstance(value, str) or _REQUEST_ID_RE.fullmatch(value) is None:
