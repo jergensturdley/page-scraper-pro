@@ -132,6 +132,9 @@ class CommandValidationTests(unittest.TestCase):
             "http://127。0。0。1/video",
             "http://ＬＯＣＡＬＨＯＳＴ/video",
             "http://localhost。/video",
+            "http://%31%32%37.0.0.1/video",
+            "http://%6cocalhost/video",
+            "http://127%2e0%2e0%2e1/video",
         )
         for url in blocked:
             with self.subTest(url=url):

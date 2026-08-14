@@ -93,6 +93,8 @@ def normalize_http_url(value: object) -> str:
         raise ValueError("URL is malformed") from exc
     if scheme not in {"http", "https"}:
         raise ValueError("URL scheme must be HTTP or HTTPS")
+    if "%" in parsed.netloc:
+        raise ValueError("percent escapes are not allowed in URL authority")
     if not hostname:
         raise ValueError("URL must include a host")
     if parsed.username is not None or parsed.password is not None:
