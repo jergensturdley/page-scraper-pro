@@ -98,10 +98,47 @@ def _patch_request_constructor(
     setattr(request_class, "__init__", guarded_init)
 
 
+def _socket_address_parts(
+    family: int, address: object
+) -> tuple[str, int]:
+    if family == socket.AF_INET:
+        if not isinstance(address, tuple) or len(address) != 2:
+            raise _UnsafeNetworkTarget("unsupported IPv4 socket address")
+    elif family == socket.AF_INET6:
+        if not isinstance(address, tuple) or len(address) not in {2, 3, 4}:
+            raise _UnsafeNetworkTarget("unsupported IPv6 socket address")
+    else:
+        raise _UnsafeNetworkTarget("only INET socket connections are allowed")
+    host, port = address[:2]
+    if (
+        not isinstance(host, str)
+        or not host
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 0 <= port <= 65_535
+    ):
+        raise _UnsafeNetworkTarget("unsupported INET socket address")
+    return host, port
+
+
+def _numeric_socket_address(family: int, address: object) -> bool:
+    host, _ = _socket_address_parts(family, address)
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    expected_version = 4 if family == socket.AF_INET else 6
+    if parsed.version != expected_version or not _is_global_address(host):
+        raise _UnsafeNetworkTarget("socket address is not global")
+    return True
+
+
 @contextmanager
 def _network_guard() -> Iterator[None]:
     """Revalidate DNS results and every visible request URL during extraction."""
     original_getaddrinfo = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
     proxy_environment = {
         key: value
         for key, value in os.environ.items()
@@ -119,6 +156,38 @@ def _network_guard() -> Iterator[None]:
             if not isinstance(resolved, str) or not _is_global_address(resolved):
                 raise _UnsafeNetworkTarget("resolver returned a non-global address")
         return answers
+
+    def validated_connect_address(instance: socket.socket, address: object) -> object:
+        family = instance.family
+        if _numeric_socket_address(family, address):
+            return address
+        host, port = _socket_address_parts(family, address)
+        answers = guarded_getaddrinfo(
+            host,
+            port,
+            family=family,
+            type=instance.type,
+            proto=instance.proto,
+        )
+        for answer in answers:
+            try:
+                answer_family, answer_type, _, _, sockaddr = answer
+            except (TypeError, ValueError) as exc:
+                raise _UnsafeNetworkTarget("resolver returned an invalid answer") from exc
+            if answer_family != family or answer_type != instance.type:
+                continue
+            if not _numeric_socket_address(family, sockaddr):
+                raise _UnsafeNetworkTarget("resolver returned a hostname address")
+            return sockaddr
+        raise _UnsafeNetworkTarget("resolver returned no compatible address")
+
+    def guarded_connect(instance: socket.socket, address: object) -> object:
+        return original_connect(instance, validated_connect_address(instance, address))
+
+    def guarded_connect_ex(instance: socket.socket, address: object) -> int:
+        return original_connect_ex(
+            instance, validated_connect_address(instance, address)
+        )
 
     original_redirect = urllib.request.HTTPRedirectHandler.redirect_request
 
@@ -147,6 +216,10 @@ def _network_guard() -> Iterator[None]:
                 del os.environ[key]
         socket.getaddrinfo = guarded_getaddrinfo
         restorations.append((socket, "getaddrinfo", original_getaddrinfo))
+        socket.socket.connect = guarded_connect
+        restorations.append((socket.socket, "connect", original_connect))
+        socket.socket.connect_ex = guarded_connect_ex
+        restorations.append((socket.socket, "connect_ex", original_connect_ex))
         _patch_request_constructor(urllib.request.Request, restorations)
         restorations.append(
             (urllib.request.HTTPRedirectHandler, "redirect_request", original_redirect)

@@ -30,6 +30,9 @@ class RecordingYoutubeDL:
     exception = None
     redirect_url = None
     resolve_host = None
+    connect_method = None
+    connect_target = None
+    connect_family = socket.AF_INET
     instances = []
 
     def __init__(self, options):
@@ -52,6 +55,9 @@ class RecordingYoutubeDL:
         self.extract_calls.append((url, download))
         if self.resolve_host:
             socket.getaddrinfo(self.resolve_host, 443, type=socket.SOCK_STREAM)
+        if self.connect_method and self.connect_target:
+            with socket.socket(self.connect_family, socket.SOCK_STREAM) as client:
+                getattr(client, self.connect_method)(self.connect_target)
         if self.redirect_url:
             urllib.request.HTTPRedirectHandler().redirect_request(
                 None, None, 302, "Found", {}, self.redirect_url
@@ -76,6 +82,9 @@ class WorkerAnalysisTests(unittest.TestCase):
         RecordingYoutubeDL.exception = None
         RecordingYoutubeDL.redirect_url = None
         RecordingYoutubeDL.resolve_host = None
+        RecordingYoutubeDL.connect_method = None
+        RecordingYoutubeDL.connect_target = None
+        RecordingYoutubeDL.connect_family = socket.AF_INET
 
     def test_analyzer_uses_cookie_free_non_downloading_options_once(self):
         result = analyze_url(
@@ -200,6 +209,95 @@ class WorkerAnalysisTests(unittest.TestCase):
                     analyze_url("https://media.example/video", RecordingYoutubeDL)
                 self.assertEqual(raised.exception.code, "unsafe_network_target")
 
+    def test_blocks_direct_and_cached_non_global_socket_connections(self):
+        cases = (
+            ("connect", ("127.0.0.1", 443)),
+            ("connect_ex", ("169.254.169.254", 80)),
+            ("connect", ("10.20.30.40", 443)),
+        )
+        for method, target in cases:
+            with self.subTest(method=method, target=target):
+                RecordingYoutubeDL.connect_method = method
+                RecordingYoutubeDL.connect_target = target
+                delegated = mock.Mock(return_value=0 if method == "connect_ex" else None)
+
+                def delegate(instance, address, _delegated=delegated):
+                    return _delegated(instance, address)
+
+                with mock.patch.object(socket.socket, method, new=delegate):
+                    with self.assertRaises(AnalysisError) as raised:
+                        analyze_url("https://media.example/video", RecordingYoutubeDL)
+                self.assertEqual(raised.exception.code, "unsafe_network_target")
+                delegated.assert_not_called()
+
+    def test_blocks_hostname_connect_when_dns_resolves_private(self):
+        RecordingYoutubeDL.connect_method = "connect"
+        RecordingYoutubeDL.connect_target = ("media.example", 443)
+        private_answer = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443))
+        ]
+        delegated = mock.Mock()
+
+        def delegate(instance, address):
+            return delegated(instance, address)
+
+        with mock.patch("socket.getaddrinfo", return_value=private_answer), mock.patch.object(
+            socket.socket, "connect", new=delegate
+        ):
+            with self.assertRaises(AnalysisError) as raised:
+                analyze_url("https://media.example/video", RecordingYoutubeDL)
+        self.assertEqual(raised.exception.code, "unsafe_network_target")
+        delegated.assert_not_called()
+
+    def test_public_hostname_connect_and_connect_ex_delegate_numeric_sockaddr(self):
+        public_answer = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+        for method, return_value in (("connect", None), ("connect_ex", 0)):
+            with self.subTest(method=method):
+                RecordingYoutubeDL.connect_method = method
+                RecordingYoutubeDL.connect_target = ("media.example", 443)
+                delegated = mock.Mock(return_value=return_value)
+
+                def delegate(instance, address, _delegated=delegated):
+                    self.assertEqual(instance.family, socket.AF_INET)
+                    self.assertEqual(instance.type, socket.SOCK_STREAM)
+                    return _delegated(instance, address)
+
+                with mock.patch("socket.getaddrinfo", return_value=public_answer) as resolver, mock.patch.object(
+                    socket.socket, method, new=delegate
+                ):
+                    result = analyze_url(
+                        "https://media.example/video", RecordingYoutubeDL
+                    )
+                self.assertEqual(result["title"], "Synthetic Public Media")
+                delegated.assert_called_once()
+                self.assertEqual(delegated.call_args.args[1], ("93.184.216.34", 443))
+                self.assertEqual(resolver.call_args.args[:2], ("media.example", 443))
+                self.assertEqual(resolver.call_args.kwargs["family"], socket.AF_INET)
+                self.assertEqual(resolver.call_args.kwargs["type"], socket.SOCK_STREAM)
+
+    def test_rejects_unix_and_unsupported_socket_address_shapes(self):
+        cases = []
+        if hasattr(socket, "AF_UNIX"):
+            cases.append((socket.AF_UNIX, "/tmp/not-allowed.sock"))
+        cases.append((socket.AF_INET, ("93.184.216.34",)))
+        for family, target in cases:
+            with self.subTest(family=family, target=target):
+                RecordingYoutubeDL.connect_method = "connect"
+                RecordingYoutubeDL.connect_family = family
+                RecordingYoutubeDL.connect_target = target
+                delegated = mock.Mock()
+
+                def delegate(instance, address, _delegated=delegated):
+                    return _delegated(instance, address)
+
+                with mock.patch.object(socket.socket, "connect", new=delegate):
+                    with self.assertRaises(AnalysisError) as raised:
+                        analyze_url("https://media.example/video", RecordingYoutubeDL)
+                self.assertEqual(raised.exception.code, "unsafe_network_target")
+                delegated.assert_not_called()
+
     def test_rejects_non_http_redirect_attempt(self):
         RecordingYoutubeDL.redirect_url = "file:///tmp/not-allowed"
         with self.assertRaises(AnalysisError) as raised:
@@ -209,6 +307,8 @@ class WorkerAnalysisTests(unittest.TestCase):
 
     def test_restores_dns_and_proxy_environment_after_guard_exits(self):
         original_resolver = socket.getaddrinfo
+        original_connect = socket.socket.connect
+        original_connect_ex = socket.socket.connect_ex
         proxy_values = {
             "HTTP_PROXY": "http://proxy.example:8080",
             "https_proxy": "http://proxy.example:8443",
@@ -228,6 +328,8 @@ class WorkerAnalysisTests(unittest.TestCase):
             )
         self.assertEqual(seen, {key: None for key in proxy_values})
         self.assertIs(socket.getaddrinfo, original_resolver)
+        self.assertIs(socket.socket.connect, original_connect)
+        self.assertIs(socket.socket.connect_ex, original_connect_ex)
 
     def test_normalize_url_remains_dns_free(self):
         from native_host.validation import normalize_http_url
