@@ -30,8 +30,8 @@ _MAX_EVENT_NODES = 2_048
 _MAX_EVENT_STRING_LENGTH = 16_384
 _MAX_ERROR_MESSAGE_LENGTH = 1_000
 _MAX_SAFE_INTEGER = (1 << 53) - 1
-_NUMERIC_HOST_RE = re.compile(r"^[0-9.]+$")
-_HEX_HOST_RE = re.compile(r"^0x[0-9a-f]+(?:\.|$)", re.IGNORECASE)
+_DECIMAL_HOST_LABEL_RE = re.compile(r"^[0-9]+$")
+_HEX_HOST_LABEL_RE = re.compile(r"^0x[0-9a-f]+$", re.IGNORECASE)
 
 
 def _require_exact_keys(
@@ -41,22 +41,33 @@ def _require_exact_keys(
         raise ValueError(f"{label} fields do not match schema")
 
 
-def _is_strict_ipv4(hostname: str) -> bool:
-    parts = hostname.split(".")
-    return len(parts) == 4 and all(
-        part.isascii()
-        and part.isdecimal()
-        and (part == "0" or not part.startswith("0"))
-        and int(part) <= 255
-        for part in parts
+def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        address.is_global
+        and not address.is_loopback
+        and not address.is_private
+        and not address.is_link_local
+        and not address.is_reserved
+        and not address.is_multicast
+        and not address.is_unspecified
     )
 
 
 def _reject_ambiguous_numeric_host(hostname: str) -> None:
-    if _HEX_HOST_RE.match(hostname):
-        raise ValueError("ambiguous numeric hostnames are not allowed")
-    if _NUMERIC_HOST_RE.fullmatch(hostname) and not _is_strict_ipv4(hostname):
-        raise ValueError("ambiguous numeric hostnames are not allowed")
+    labels = hostname.split(".")
+    numericish = all(
+        _DECIMAL_HOST_LABEL_RE.fullmatch(label)
+        or _HEX_HOST_LABEL_RE.fullmatch(label)
+        for label in labels
+    )
+    if not numericish:
+        return
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError as exc:
+        raise ValueError("ambiguous numeric hostnames are not allowed") from exc
+    if not _is_public_address(address):
+        raise ValueError("non-global IP addresses are not allowed")
 
 
 def normalize_http_url(value: object) -> str:
@@ -87,26 +98,22 @@ def normalize_http_url(value: object) -> str:
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("URL credentials are not allowed")
 
-    normalized_host = hostname.lower()
-    host_without_final_dot = normalized_host.rstrip(".")
-    if host_without_final_dot == "localhost" or host_without_final_dot.endswith(
-        ".localhost"
-    ):
-        raise ValueError("local hostnames are not allowed")
-    _reject_ambiguous_numeric_host(host_without_final_dot)
     try:
-        address = ipaddress.ip_address(host_without_final_dot)
+        normalized_host = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("URL hostname is not valid IDNA") from exc
+    if normalized_host.endswith("."):
+        normalized_host = normalized_host[:-1]
+    if not normalized_host:
+        raise ValueError("URL must include a host")
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise ValueError("local hostnames are not allowed")
+    _reject_ambiguous_numeric_host(normalized_host)
+    try:
+        address = ipaddress.ip_address(normalized_host)
     except ValueError:
         address = None
-    if address is not None and (
-        not address.is_global
-        or address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    ):
+    if address is not None and not _is_public_address(address):
         raise ValueError("non-global IP addresses are not allowed")
 
     # Task 3 network fetches must revalidate every resolved and redirected IP

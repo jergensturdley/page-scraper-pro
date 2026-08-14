@@ -125,6 +125,13 @@ class CommandValidationTests(unittest.TestCase):
             "http://2130706433/video",
             "http://0x7f000001/video",
             "http://127.000.000.001/video",
+            "http://127.0x0.0.1/video",
+            "http://127.0.0x0.1/video",
+            "http://127.0.0.0x1/video",
+            "http://１２７.０.０.１/video",
+            "http://127。0。0。1/video",
+            "http://ＬＯＣＡＬＨＯＳＴ/video",
+            "http://localhost。/video",
         )
         for url in blocked:
             with self.subTest(url=url):
@@ -140,11 +147,19 @@ class CommandValidationTests(unittest.TestCase):
             normalize_http_url("https://public-media.example/video"),
             "https://public-media.example/video",
         )
+        self.assertEqual(
+            normalize_http_url("HTTPS://BÜCHER.Example./Video?q=1#part"),
+            "https://xn--bcher-kva.example/Video?q=1",
+        )
         self.assertEqual(normalize_http_url("http://8.8.8.8/video"), "http://8.8.8.8/video")
         self.assertEqual(
             normalize_http_url("https://[2606:4700:4700::1111]/video"),
             "https://[2606:4700:4700::1111]/video",
         )
+
+    def test_rejects_invalid_idna_hostname(self):
+        with self.assertRaises(ValueError):
+            normalize_http_url("https://" + ("a" * 64) + ".example/video")
 
     def test_rejects_dangerous_download_fields(self):
         base = {"media_id": "media_abc", "preset": "best", "confirmed": True}
