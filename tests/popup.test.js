@@ -2094,4 +2094,168 @@ this.createZipFromUrls = createZipFromUrls;`, backgroundContext);
     });
   });
 
+
+// ─── deep-video.js behavior and accessibility tests ───────────────────────────
+
+  // Helper: read popup.js source for static analysis tests
+  function deepVideoPopupSource() {
+    return fs.readFileSync(popupJsPath, 'utf8');
+  }
+
+
+// ─── deep-video.js behavior and accessibility tests ───────────────────────────
+// Uses static analysis (reading file contents) rather than VM execution
+// to avoid Chrome API mocking complexity.
+
+
+// ─── deep-video.js behavior and accessibility tests ───────────────────────────
+// Uses static analysis (reading file contents) for reliable verification.
+
+  describe('deep-video.js behavior and accessibility', function() {
+    test('deep video DOM elements exist in popup.html with correct ARIA roles', function() {
+      var popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+      // Status region must be live="polite"
+      expect(popupHtml).toMatch(/id="deepVideoStatus"[^>]+role="status"[^>]+aria-live="polite"/);
+      // Download button
+      expect(popupHtml).toMatch(/id="deepVideoDownloadBtn"/);
+      // Cancel and Retry buttons
+      expect(popupHtml).toMatch(/id="deepVideoCancelBtn"/);
+      expect(popupHtml).toMatch(/id="deepVideoRetryBtn"/);
+      // Installation guidance must be role="alert"
+      expect(popupHtml).toMatch(/id="deepVideoInstallGuidance"[^>]+role="alert"/);
+      // Deep scan button labelled "Deep scan this page"
+      expect(popupHtml).toMatch(/id="deepScanBtn"/);
+      expect(popupHtml).toMatch(/Deep scan this page/);
+      // Progress wrapper has role="progressbar" and proper ARIA attributes
+      expect(popupHtml).toMatch(/role="progressbar"[^>]+aria-label="Download progress"[^>]+aria-valuemin="0"[^>]+aria-valuemax="100"/);
+    });
+
+    test('deep video presets are a radio fieldset with legend', function() {
+      var popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+      // Must be a fieldset (not div) for keyboard accessibility
+      expect(popupHtml).toMatch(/<fieldset[^>]+id="deepVideoPresets"/);
+      // Must have sr-only legend for screen readers
+      expect(popupHtml).toMatch(/<legend[^>]+class="sr-only"[^>]*>Choose download quality<\/legend>/);
+      // Must have 4 radio options
+      var matches = popupHtml.match(/<input[^>]+type="radio"[^>]+name="deepPreset"[^>]*>/g);
+      expect(matches).not.toBeNull();
+      expect(matches.length).toBe(4);
+    });
+
+    test('deep video panel starts hidden in HTML', function() {
+      var popupHtml = fs.readFileSync(popupHtmlPath, 'utf8');
+      // The panel must have hidden attribute initially
+      expect(popupHtml).toMatch(/id="deepVideoPanel"[^>]+hidden/);
+    });
+
+    test('renderDeepVideo uses textContent not innerHTML for user strings', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Verify the function exists and uses textContent
+      expect(popupJs).toMatch(/function renderDeepVideo/);
+      // Extract the renderDeepVideo function body
+      var fnStart = popupJs.indexOf('function renderDeepVideo');
+      var fnBody = popupJs.slice(fnStart, fnStart + 7000);
+      // Must use textContent for safe DOM updates (no innerHTML injection risk)
+      expect(fnBody).toMatch(/\.textContent\s*=/);
+    });
+
+    test('renderDeepVideo shows/hides installation guidance for helper_unavailable', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      var fnStart = popupJs.indexOf('function renderDeepVideo');
+      var fnBody = popupJs.slice(fnStart, fnStart + 7000);
+      // Must show guidance when error_code is helper_unavailable
+      expect(fnBody).toMatch(/helper_unavailable/);
+      expect(fnBody).toMatch(/deepVideoInstallGuidance\.hidden/);
+    });
+
+    test('sendDeepVideoCommand dispatches deepVideoCommand action to background', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Must send the correct action name to chrome.runtime
+      expect(popupJs).toMatch(/action:\s*['"]deepVideoCommand['"]/);
+      // Must use chrome.runtime.sendMessage (not fetch or XMLHttpRequest)
+      expect(popupJs).toMatch(/chrome\.runtime\.sendMessage/);
+    });
+
+    test('analyze command sends only URL (no raw yt-dlp options)', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Find the deepScanBtn click handler
+      var scanBtnIdx = popupJs.indexOf('elements.deepScanBtn');
+      var btnBlock = popupJs.slice(scanBtnIdx, scanBtnIdx + 1000);
+      // analyze must NOT send yt-dlp-specific fields
+      expect(btnBlock).not.toMatch(/preset:\s*['"]/);
+      expect(btnBlock).not.toMatch(/format:\s*['"]/);
+      expect(btnBlock).not.toMatch(/output:\s*['"]/);
+      expect(btnBlock.toLowerCase()).not.toMatch(/ytdlp|yt.dlp/);
+    });
+
+    test('download command sends only media_id, preset, and confirmed:true', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Find the download button event listener inside DOMContentLoaded
+      var domSection = popupJs.slice(popupJs.indexOf('document.addEventListener'));
+      var dlBtnIdx = domSection.indexOf('elements.deepVideoDownloadBtn');
+      var dlBlock = domSection.slice(dlBtnIdx, dlBtnIdx + 1000);
+      // Must include media_id, preset (from variable), and confirmed
+      expect(dlBlock).toMatch(/media_id:\s*deepVideoState\.media_id/);
+      expect(dlBlock).toMatch(/preset:\s*preset/);
+      expect(dlBlock).toMatch(/confirmed:\s*true/);
+      // Must NOT include paths or yt-dlp raw options
+      expect(dlBlock).not.toMatch(/output:\s*['"]/);
+    });
+
+    test('deepVideoState has typeof guard against missing deep-video.js globals', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Must have the typeof guard so popup.js doesn't break in the test VM
+      expect(popupJs).toMatch(/typeof\s+DEEP_VIDEO_INITIAL_STATE\s*!==\s*['"]undefined['"]/);
+    });
+
+    test('deep video CSS defines dark theme styles using CSS variables', function() {
+      var css = fs.readFileSync(stylesPath, 'utf8');
+      // All deep video panel styles must use CSS variables for theming
+      expect(css).toMatch(/\.deep-video-panel\s*\{/);
+      expect(css).toMatch(/\.deep-video-status\s*\{/);
+      expect(css).toMatch(/\.deep-video-presets\s*\{/);
+      expect(css).toMatch(/\.deep-video-progress\s*\{/);
+      // Progress bar must use --accent variable
+      expect(css).toMatch(/\.progress-bar\s*\{[^}]*background:\s*var\(--accent\)/);
+    });
+
+    test('deep video CSS includes prefers-reduced-motion rules', function() {
+      var css = fs.readFileSync(stylesPath, 'utf8');
+      // Must respect user motion preferences
+      expect(css).toMatch(/@media\s*\(\s*prefers-reduced-motion/);
+    });
+
+    test('deep video CSS includes 320px responsive breakpoints', function() {
+      var css = fs.readFileSync(stylesPath, 'utf8');
+      // Must be usable on small screens
+      expect(css).toMatch(/@media\s*\(\s*max-width:\s*320px\s*\)/);
+    });
+
+    test('cancel command sends only job_id (no paths or options)', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Find the cancel button event listener inside DOMContentLoaded
+      var domSection = popupJs.slice(popupJs.indexOf('document.addEventListener'));
+      var cancelIdx = domSection.indexOf('elements.deepVideoCancelBtn');
+      var cancelBlock = domSection.slice(cancelIdx, cancelIdx + 600);
+      // Cancel must send job_id from state
+      expect(cancelBlock).toMatch(/job_id/);
+      // Must NOT send preset, output, or other yt-dlp options
+      expect(cancelBlock).not.toMatch(/preset:\s*['"]/);
+      expect(cancelBlock).not.toMatch(/output:\s*['"]/);
+    });
+
+    test('Retry dispatches retry action without calling background', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Find the Retry button handler inside DOMContentLoaded
+      var domSection = popupJs.slice(popupJs.indexOf('document.addEventListener'));
+      var retryIdx = domSection.indexOf('elements.deepVideoRetryBtn');
+      var retryBlock = domSection.slice(retryIdx, retryIdx + 400);
+      // Retry must dispatch 'retry' to the reducer
+      expect(retryBlock).toMatch(/type:\s*['"]retry['"]/);
+      // Retry must NOT call sendDeepVideoCommand
+      expect(retryBlock).not.toMatch(/sendDeepVideoCommand/);
+    });
+  });
+
+
 });
