@@ -13,26 +13,60 @@ _MAX_ENTRIES = 32
 _MAX_STRING_LENGTH = 512
 _MAX_KEY_LENGTH = 128
 _HEADER_RE = re.compile(
-    r"(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]*"
+    r"(?i)(?<![a-z0-9-])"
+    r"("
+    r"(?:proxy-authorization|authorization|set-cookie|cookie|"
+    r"x-api-key|api-key|x-auth-token)"
+    r"\s*:\s*"
+    r")"
+    r"[^\r\n]*"
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![~:/\w])/(?!/)[^\r\n\"'<>]*")
-_SENSITIVE_KEY_TOKENS = (
-    "authorization",
-    "cookie",
-    "token",
-    "secret",
-    "password",
-    "credential",
-    "destination",
-    "path",
-    "filename",
-    "output",
-    "file",
-    "traceback",
-    "stacktrace",
+_PATH_END = (
+    r"(?=$|[\r\n\"'<>]|[),;]"
+    r"|\s+(?:with|during|because|while|after|before|from|at|code|error)\b)"
 )
-_URL_KEYS = frozenset({"url", "source-url", "webpage-url", "request-url"})
+_FILESYSTEM_PATH_RE = re.compile(
+    r"(?<![a-zA-Z0-9_~:/])"
+    r"("
+    r"~/[^\r\n\"'<>]+?"
+    r"|file:/{1,3}[^\r\n\"'<>]*?"
+    r"|//(?:Users|Volumes|private|tmp|var|etc|Library|Applications|System|"
+    r"opt|usr|bin|sbin|dev|home)(?:/[^\r\n\"'<>]*?)?"
+    r"|/(?:Users|Volumes|private|tmp|var|etc|Library|Applications|System|"
+    r"opt|usr|bin|sbin|dev|home)(?:/[^\r\n\"'<>]*?)?"
+    r")"
+    + _PATH_END,
+    re.IGNORECASE,
+)
+_SENSITIVE_COMPONENTS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "destination",
+        "path",
+        "filename",
+        "output",
+        "file",
+        "filepath",
+        "traceback",
+        "stacktrace",
+    }
+)
+_SENSITIVE_COMPOUNDS = frozenset(
+    {
+        ("api", "key"),
+        ("private", "key"),
+        ("session", "id"),
+        ("file", "path"),
+    }
+)
+_URL_KEYS = frozenset({("url",), ("source", "url"), ("webpage", "url"), ("request", "url")})
 
 
 def _bounded(value: str) -> str:
@@ -77,13 +111,34 @@ def _redact_embedded_url(match: re.Match[str]) -> str:
     return redact_url(candidate) + trailing
 
 
+def _redact_filesystem_path(match: re.Match[str]) -> str:
+    value = match.group(0)
+    if value.startswith("~/"):
+        return "~/<redacted>"
+    if value.casefold().startswith("file:"):
+        return "file:<redacted>"
+    return _REDACTED
+
+
+def _redact_home_paths(value: str, home: Path) -> str:
+    home_text = str(home)
+    if not home_text or home_text == os.sep:
+        return value
+    pattern = re.compile(
+        re.escape(home_text)
+        + r"(?:/[^\r\n\"'<>]*?)?"
+        + _PATH_END
+    )
+    return pattern.sub("~/<redacted>", value)
+
+
 def redact_text(
     value: str,
     *,
     home: Path | None = None,
     max_length: int = _MAX_STRING_LENGTH,
 ) -> str:
-    """Redact secret headers, URL parameters, and paths below the user home."""
+    """Redact secret headers, URL parameters, and filesystem paths."""
     if not isinstance(value, str):
         raise TypeError("diagnostic text must be a string")
     if type(max_length) is not int or max_length < len(_TRUNCATED):
@@ -95,36 +150,38 @@ def redact_text(
     private_home = home if home is not None else Path.home()
     if not isinstance(private_home, Path):
         raise TypeError("home must be a Path")
-    home_text = str(private_home)
-    if home_text and home_text != os.sep:
-        home_pattern = re.compile(
-            rf"{re.escape(home_text)}(?:{re.escape(os.sep)}[^\s\"'<>]*)?"
-        )
-        redacted = home_pattern.sub("~/<redacted>", redacted)
-    redacted = _ABSOLUTE_PATH_RE.sub(_REDACTED, redacted)
+    redacted = _redact_home_paths(redacted, private_home)
+    redacted = _FILESYSTEM_PATH_RE.sub(_redact_filesystem_path, redacted)
 
     if len(redacted) > max_length:
         redacted = redacted[: max_length - len(_TRUNCATED)] + _TRUNCATED
     return redacted
 
 
-def _normalized_key(key: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", key.casefold())
+def _key_components(key: str) -> tuple[str, ...]:
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+    expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", expanded)
+    return tuple(re.findall(r"[a-z0-9]+", expanded.casefold()))
 
 
 def _is_sensitive_key(key: str) -> bool:
-    normalized = _normalized_key(key)
-    return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
+    components = _key_components(key)
+    if any(component in _SENSITIVE_COMPONENTS for component in components):
+        return True
+    return any(
+        pair in _SENSITIVE_COMPOUNDS
+        for pair in zip(components, components[1:])
+    )
 
 
 def _redact_value(value: object, *, key: str | None, home: Path, depth: int) -> object:
     if depth > _MAX_DEPTH:
         return _TRUNCATED
-    normalized_key = _normalized_key(key) if key is not None else None
+    components = _key_components(key) if key is not None else ()
     if key is not None and _is_sensitive_key(key):
         return _REDACTED
     if isinstance(value, str):
-        if normalized_key in _URL_KEYS:
+        if components in _URL_KEYS:
             return redact_url(value)
         return redact_text(value, home=home)
     if value is None or isinstance(value, bool) or type(value) is int:

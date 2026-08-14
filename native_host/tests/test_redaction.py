@@ -58,6 +58,37 @@ class TextRedactionTests(unittest.TestCase):
             "failed to move <redacted>",
         )
 
+    def test_exact_api_and_auth_token_headers_are_redacted_inline(self):
+        for header in ("X-Api-Key", "Api-Key", "X-Auth-Token"):
+            with self.subTest(header=header):
+                text = f"request {header}: do-not-log with network_error"
+                redacted = redact_text(text, home=self.home)
+                self.assertEqual(redacted, f"request {header}: <redacted>")
+                self.assertNotIn("do-not-log", redacted)
+
+    def test_filesystem_schemes_and_roots_preserve_following_context(self):
+        values = (
+            "copy ~/Downloads/My Video.mp4 with code network_error",
+            "copy file:/Volumes/Media Disk/My Video.mp4 with code network_error",
+            "copy //Volumes/Media Disk/My Video.mp4 with code network_error",
+            "copy /Volumes/Media Disk/My Video.mp4 with code network_error",
+        )
+        expected_prefixes = (
+            "copy ~/<redacted>",
+            "copy file:<redacted>",
+            "copy <redacted>",
+            "copy <redacted>",
+        )
+        for value, prefix in zip(values, expected_prefixes):
+            with self.subTest(value=value):
+                redacted = redact_text(value, home=self.home)
+                self.assertEqual(redacted, prefix + " with code network_error")
+                self.assertNotIn("My Video.mp4", redacted)
+
+    def test_arithmetic_slashes_are_not_treated_as_paths(self):
+        text = "retry 1 / 2 after network_error"
+        self.assertEqual(redact_text(text, home=self.home), text)
+
     def test_home_paths_are_replaced_without_disclosing_filename(self):
         private_path = self.home / "Downloads" / "private-video.mp4"
         text = f"failed to move {private_path} during completion"
@@ -122,6 +153,33 @@ class MappingRedactionTests(unittest.TestCase):
             redact_mapping(source, home=self.home),
             {key: "<redacted>" for key in source},
         )
+
+    def test_sensitive_key_components_redact_without_substring_false_positives(self):
+        sensitive = {
+            "apiKey": "leak-api",
+            "private_key": "leak-private",
+            "sessionId": "leak-session",
+            "auth_token": "leak-token",
+            "user_passwd": "leak-passwd",
+            "destinationFilename": "leak-filename",
+            "resolved path": "leak-path",
+            "output_file": "leak-output",
+            "filePath": "leak-filepath",
+            "file": "leak-file",
+        }
+        benign = {
+            "profile": "PublicProfile",
+            "tokenizer": "standard",
+            "secretary": "operator",
+            "pathology": "none",
+        }
+        redacted = redact_mapping({**sensitive, **benign}, home=self.home)
+        for key in sensitive:
+            self.assertEqual(redacted[key], "<redacted>")
+        for key, value in benign.items():
+            self.assertEqual(redacted[key], value)
+        for leak in sensitive.values():
+            self.assertNotIn(leak, repr(redacted))
 
     def test_useful_scalar_context_is_preserved(self):
         source = {

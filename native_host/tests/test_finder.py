@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -115,11 +116,55 @@ class DestinationValidationTests(unittest.TestCase):
         with self.assertRaises(FolderSelectionError):
             validate_destination(linked, self.app_dir)
 
-    def test_rejects_unwritable_directories_using_os_access(self):
-        with mock.patch("native_host.finder.os.access", return_value=False) as access:
+    def test_accepts_searchable_writable_directory_without_read_permission(self):
+        self.destination.chmod(0o300)
+        try:
+            self.assertEqual(
+                validate_destination(self.destination, self.app_dir),
+                self.destination.resolve(),
+            )
+        finally:
+            self.destination.chmod(0o700)
+
+    def test_rejects_real_write_only_directory_without_search_permission(self):
+        self.destination.chmod(0o200)
+        try:
             with self.assertRaises(FolderSelectionError):
                 validate_destination(self.destination, self.app_dir)
-        access.assert_called_once_with(self.destination.resolve(), 2)
+        finally:
+            self.destination.chmod(0o700)
+
+    def test_successful_probe_is_removed(self):
+        validate_destination(self.destination, self.app_dir)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_detects_directory_swap_after_no_follow_open(self):
+        moved = self.root / "downloads-before-swap"
+        real_open = os.open
+        swapped = False
+
+        def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            if (
+                not swapped
+                and dir_fd is None
+                and Path(path) == self.destination.resolve()
+            ):
+                self.destination.rename(moved)
+                self.destination.mkdir()
+                swapped = True
+            return descriptor
+
+        with mock.patch("native_host.finder.os.open", side_effect=swapping_open):
+            with self.assertRaises(FolderSelectionError):
+                validate_destination(self.destination, self.app_dir)
+
+        self.assertTrue(swapped)
+        for directory in (moved, self.destination):
+            self.assertFalse(
+                any(child.name.startswith(".pagescraper-pro-probe-") for child in directory.iterdir())
+            )
 
     def test_rejects_helper_app_directory_and_its_descendants(self):
         private_child = self.app_dir / "downloads"

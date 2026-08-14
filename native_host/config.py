@@ -1,13 +1,16 @@
 """Private atomic configuration storage for the native helper."""
 
+import fcntl
 import json
 import math
 import os
 import secrets
 import stat
 from pathlib import Path
+from typing import Callable
 
 _CONFIG_NAME = "config.json"
+_LOCK_NAME = ".config.lock"
 _DEFAULT_STATE: dict[str, object] = {"destination": None, "recent_job": None}
 _RECENT_JOB_FIELDS = frozenset(
     {
@@ -28,7 +31,11 @@ _RECENT_JOB_FIELDS = frozenset(
 _MAX_RECENT_FIELDS = 12
 _MAX_RECENT_STRING_LENGTH = 256
 _MAX_SAFE_INTEGER = (1 << 53) - 1
-_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
 _FILE_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -109,16 +116,23 @@ class HelperConfig:
                     if not create:
                         os.close(descriptor)
                         return None
-                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
                     before = os.stat(
                         component, dir_fd=descriptor, follow_symlinks=False
                     )
                 if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
-                    raise ValueError("helper directory components must be real directories")
+                    raise ValueError(
+                        "helper directory components must be real directories"
+                    )
                 try:
                     child = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
                 except OSError as exc:
-                    raise ValueError("helper directory component could not be opened") from exc
+                    raise ValueError(
+                        "helper directory component could not be opened"
+                    ) from exc
                 after = os.fstat(child)
                 if not stat.S_ISDIR(after.st_mode) or not _same_file(before, after):
                     os.close(child)
@@ -133,44 +147,99 @@ class HelperConfig:
             raise
 
     @staticmethod
-    def _config_stat(directory_fd: int) -> os.stat_result | None:
+    def _entry_stat(directory_fd: int, name: str) -> os.stat_result | None:
         try:
-            value = os.stat(
-                _CONFIG_NAME, dir_fd=directory_fd, follow_symlinks=False
-            )
+            return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
-        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+
+    @classmethod
+    def _config_stat(cls, directory_fd: int) -> os.stat_result | None:
+        value = cls._entry_stat(directory_fd, _CONFIG_NAME)
+        if value is not None and (
+            stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode)
+        ):
             raise ValueError("config path must be a regular file, not a symlink")
         return value
 
-    def load(self) -> dict[str, object]:
-        """Load validated private state through no-follow directory handles."""
-        directory_fd = self._open_app_directory(create=False)
-        if directory_fd is None:
+    @classmethod
+    def _open_lock(cls, directory_fd: int, *, exclusive: bool) -> int:
+        descriptor = -1
+        before: os.stat_result | None = None
+        for _ in range(16):
+            before = cls._entry_stat(directory_fd, _LOCK_NAME)
+            if before is not None and (
+                stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode)
+            ):
+                raise ValueError("config lock must be a regular file, not a symlink")
+            try:
+                if before is None:
+                    descriptor = os.open(
+                        _LOCK_NAME,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | _FILE_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory_fd,
+                    )
+                else:
+                    descriptor = os.open(
+                        _LOCK_NAME,
+                        os.O_RDWR | _FILE_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                break
+            except FileExistsError:
+                continue
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError("config lock could not be opened") from exc
+        if descriptor < 0:
+            raise ValueError("config lock could not be opened")
+        try:
+            opened = os.fstat(descriptor)
+            current = cls._entry_stat(directory_fd, _LOCK_NAME)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or current is None
+                or not _same_file(opened, current)
+                or (before is not None and not _same_file(before, opened))
+            ):
+                raise ValueError("config lock changed during validation")
+            os.fchmod(descriptor, 0o600)
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(descriptor, operation)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _close_lock(descriptor: int) -> None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def _load_from_fd(self, directory_fd: int) -> dict[str, object]:
+        before = self._config_stat(directory_fd)
+        if before is None:
             return dict(_DEFAULT_STATE)
         try:
-            before = self._config_stat(directory_fd)
-            if before is None:
-                return dict(_DEFAULT_STATE)
+            descriptor = os.open(
+                _CONFIG_NAME,
+                os.O_RDONLY | _FILE_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise ValueError("helper config is unreadable") from exc
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            after = os.fstat(stream.fileno())
+            if not stat.S_ISREG(after.st_mode) or not _same_file(before, after):
+                raise ValueError("helper config changed during validation")
             try:
-                descriptor = os.open(
-                    _CONFIG_NAME,
-                    os.O_RDONLY | _FILE_NOFOLLOW,
-                    dir_fd=directory_fd,
-                )
-            except OSError as exc:
+                value = json.load(stream)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise ValueError("helper config is unreadable") from exc
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                after = os.fstat(stream.fileno())
-                if not stat.S_ISREG(after.st_mode) or not _same_file(before, after):
-                    raise ValueError("helper config changed during validation")
-                try:
-                    value = json.load(stream)
-                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    raise ValueError("helper config is unreadable") from exc
-        finally:
-            os.close(directory_fd)
 
         if not isinstance(value, dict) or set(value) != {"destination", "recent_job"}:
             raise ValueError("helper config fields do not match schema")
@@ -184,6 +253,20 @@ class HelperConfig:
             raise ValueError("stored recent job must be an object or None") from exc
         return {"destination": destination, "recent_job": recent_job}
 
+    def load(self) -> dict[str, object]:
+        """Load validated private state under a process-shared read lock."""
+        directory_fd = self._open_app_directory(create=False)
+        if directory_fd is None:
+            return dict(_DEFAULT_STATE)
+        lock_fd = -1
+        try:
+            lock_fd = self._open_lock(directory_fd, exclusive=False)
+            return self._load_from_fd(directory_fd)
+        finally:
+            if lock_fd >= 0:
+                self._close_lock(lock_fd)
+            os.close(directory_fd)
+
     @staticmethod
     def _create_temporary_file(directory_fd: int) -> tuple[int, str]:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_NOFOLLOW
@@ -195,10 +278,9 @@ class HelperConfig:
                 continue
         raise ValueError("could not allocate a temporary config file")
 
-    def _write(self, value: dict[str, object]) -> None:
-        directory_fd = self._open_app_directory(create=True)
-        if directory_fd is None:
-            raise ValueError("helper app directory could not be created")
+    def _write_from_fd(
+        self, directory_fd: int, value: dict[str, object]
+    ) -> None:
         descriptor = -1
         temporary_name: str | None = None
         try:
@@ -225,6 +307,20 @@ class HelperConfig:
                     os.unlink(temporary_name, dir_fd=directory_fd)
                 except FileNotFoundError:
                     pass
+
+    def _update(self, change: Callable[[dict[str, object]], None]) -> None:
+        directory_fd = self._open_app_directory(create=True)
+        if directory_fd is None:
+            raise ValueError("helper app directory could not be created")
+        lock_fd = -1
+        try:
+            lock_fd = self._open_lock(directory_fd, exclusive=True)
+            state = self._load_from_fd(directory_fd)
+            change(state)
+            self._write_from_fd(directory_fd, state)
+        finally:
+            if lock_fd >= 0:
+                self._close_lock(lock_fd)
             os.close(directory_fd)
 
     def save_destination(self, destination: Path | None) -> None:
@@ -234,17 +330,22 @@ class HelperConfig:
                 raise TypeError("destination must be a Path or None")
             if not destination.is_absolute():
                 raise ValueError("destination must be absolute")
-        state = self.load()
-        state["destination"] = None if destination is None else str(destination)
-        self._write(state)
+
+        def change(state: dict[str, object]) -> None:
+            state["destination"] = None if destination is None else str(destination)
+
+        self._update(change)
 
     def save_recent_job(self, snapshot: dict[str, object] | None) -> None:
         """Persist at most one bounded snapshot containing safe scalar fields."""
         if snapshot is not None and not isinstance(snapshot, dict):
             raise TypeError("recent job must be an object or None")
-        state = self.load()
-        state["recent_job"] = _normalize_recent_job(snapshot)
-        self._write(state)
+        normalized = _normalize_recent_job(snapshot)
+
+        def change(state: dict[str, object]) -> None:
+            state["recent_job"] = normalized
+
+        self._update(change)
 
     def get_destination(self) -> Path | None:
         """Return the stored destination as a path, when configured."""

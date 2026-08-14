@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import stat
 import tempfile
@@ -7,6 +8,25 @@ from pathlib import Path
 from unittest import mock
 
 from native_host.config import HelperConfig
+
+
+def concurrent_config_save_worker(
+    app_dir, trusted_root, barrier, operation
+):
+    config = HelperConfig(Path(app_dir), Path(trusted_root))
+    original_load = config.load
+
+    def synchronized_load():
+        state = original_load()
+        barrier.wait(timeout=10)
+        return state
+
+    config.load = synchronized_load
+    barrier.wait(timeout=10)
+    if operation == "destination":
+        config.save_destination(Path(trusted_root).parent / "downloads")
+    else:
+        config.save_recent_job({"job_id": "job_concurrent", "state": "completed"})
 
 
 class HelperConfigTests(unittest.TestCase):
@@ -202,6 +222,41 @@ class HelperConfigTests(unittest.TestCase):
         outside = self.root / "outside-root" / "helper"
         with self.assertRaises(ValueError):
             HelperConfig(outside, self.trusted_root)
+
+    def test_lock_file_symlink_is_rejected_without_following_it(self):
+        outside = self.root / "outside-lock"
+        outside.write_text("unchanged", encoding="utf-8")
+        self.app_dir.mkdir(parents=True)
+        (self.app_dir / ".config.lock").symlink_to(outside)
+
+        with self.assertRaises(ValueError):
+            self.config.save_destination(None)
+        self.assertEqual(outside.read_text("utf-8"), "unchanged")
+
+    def test_concurrent_process_updates_preserve_both_fields(self):
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(2)
+        processes = [
+            context.Process(
+                target=concurrent_config_save_worker,
+                args=(self.app_dir, self.trusted_root, barrier, operation),
+            )
+            for operation in ("destination", "recent_job")
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
+
+        self.assertEqual(
+            self.config.load(),
+            {
+                "destination": str(self.root / "downloads"),
+                "recent_job": {"job_id": "job_concurrent", "state": "completed"},
+            },
+        )
 
     def test_wrong_top_level_and_field_types_are_rejected(self):
         invalid_values = (
