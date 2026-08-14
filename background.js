@@ -1,3 +1,58 @@
+// ─── Deep Video Native Helper Bridge ───────────────────────────────────────────
+
+// Load the native client module synchronously at the top of the service worker.
+importScripts('native-client.js');
+
+var _nativeClient = null;
+
+function getNativeClient() {
+  if (!_nativeClient) {
+    _nativeClient = new PageScraperNative.NativeHostClient({
+      runtime: chrome.runtime,
+      hostName: 'com.pagescraperpro.ytdlp',
+      timeoutMs: 60000,
+    });
+  }
+  return _nativeClient;
+}
+
+/**
+ * Forward a validated deep video command from the popup.
+ * Only the six allowlisted command types are accepted.
+ */
+chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
+  if (message && message.action === 'deepVideoCommand') {
+    var cmd = message.command;
+    var payload = message.payload || {};
+    if (!PageScraperNative.ALLOWED_COMMANDS ||
+        !PageScraperNative.ALLOWED_COMMANDS.includes(cmd)) {
+      sendResponse({ error: 'unknown_command' });
+      return;
+    }
+    getNativeClient().send(cmd, payload).then(function(result) {
+      sendResponse({ ok: true, data: result });
+    }).catch(function(err) {
+      sendResponse({ ok: false, error: err.message || String(err) });
+    });
+    return true; // async sendResponse
+  }
+
+  if (message && message.action === 'deepVideoStatus') {
+    var snap = getNativeClient().snapshot();
+    sendResponse({ ok: true, snapshot: snap });
+    return false;
+  }
+});
+
+// Broadcast snapshot updates to all popup instances.
+function broadcastDeepVideoEvent(event) {
+  chrome.runtime.sendMessage({ action: 'deepVideoEvent', event }).catch(function() {
+    // Silently ignore "receiving end does not exist" when popup is closed.
+  });
+}
+
+getNativeClient().subscribe(broadcastDeepVideoEvent);
+
 // Background script for Page Scraper Pro
 
 // Track active downloads

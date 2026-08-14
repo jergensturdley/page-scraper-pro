@@ -25,6 +25,7 @@
     "scripting",
     "downloads",
     "notifications",
-    "sidePanel"
+    "sidePanel",
+    "nativeMessaging"
   ]
 }

@@ -1556,3 +1556,198 @@ a[aria-disabled="true"] {
     transition: none;
   }
 }
+
+
+/* ─── Deep video panel ──────────────────────────────────────────────────── */
+
+.deep-video-panel {
+  padding: 12px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.deep-video-panel[hidden] {
+  display: none;
+}
+
+/* Scan button in the header */
+.deep-video-scan-btn {
+  margin-right: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.deep-video-scan-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Status text */
+.deep-video-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 8px;
+  min-height: 16px;
+}
+
+/* Result row: thumbnail + meta */
+.deep-video-result {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.deep-video-result[hidden] {
+  display: none;
+}
+
+.deep-video-thumb {
+  width: 96px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.deep-video-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.deep-video-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deep-video-provider {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 0;
+  text-transform: capitalize;
+}
+
+/* Preset fieldset */
+.deep-video-presets {
+  border: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.deep-video-presets[hidden] {
+  display: none;
+}
+
+.deep-video-presets label {
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.deep-video-presets input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+/* Destination row */
+.deep-video-destination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.deep-video-destination[hidden] {
+  display: none;
+}
+
+/* Progress */
+.deep-video-progress {
+  margin-bottom: 10px;
+}
+
+.deep-video-progress[hidden] {
+  display: none;
+}
+
+.progress-bar-wrapper {
+  height: 6px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.deep-video-progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 4px 0 0;
+  text-align: center;
+}
+
+/* Action buttons */
+.deep-video-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.deep-video-actions button[hidden] {
+  display: none;
+}
+
+/* Installation guidance */
+.deep-video-install-guidance {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+}
+
+.deep-video-install-guidance[hidden] {
+  display: none;
+}
+
+/* Responsive: stack controls at narrow widths */
+@media (max-width: 320px) {
+  .deep-video-presets {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .deep-video-actions {
+    flex-direction: column;
+  }
+
+  .deep-video-destination {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

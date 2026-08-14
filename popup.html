@@ -172,6 +172,7 @@
           <div class="tab-pane" id="videosTab" role="tabpanel" aria-labelledby="videosTabButton" hidden>
             <div class="results-header">
               <span class="results-count" id="videosCount">0 videos</span>
+              <button class="btn-small deep-video-scan-btn" id="deepScanBtn" type="button">Deep scan this page</button>
               <button class="copy-tab-btn" data-type="videos" aria-label="Copy all video URLs" title="Copy all video URLs">
                 <svg aria-hidden="true" focusable="false" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -179,6 +180,44 @@
                 </svg>
               </button>
             </div>
+
+            <!-- Deep video scan panel -->
+            <div class="deep-video-panel" id="deepVideoPanel" hidden>
+              <p class="deep-video-status" id="deepVideoStatus" role="status" aria-live="polite" aria-atomic="true"></p>
+              <div class="deep-video-result" id="deepVideoResult" hidden>
+                <img class="deep-video-thumb" id="deepVideoThumb" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="" />
+                <div class="deep-video-meta">
+                  <p class="deep-video-title" id="deepVideoTitle"></p>
+                  <p class="deep-video-provider" id="deepVideoProvider"></p>
+                </div>
+              </div>
+              <fieldset class="deep-video-presets" id="deepVideoPresets" hidden>
+                <legend class="sr-only">Choose download quality</legend>
+                <label><input type="radio" name="deepPreset" value="best" checked /> Best available</label>
+                <label><input type="radio" name="deepPreset" value="1080p" /> 1080p</label>
+                <label><input type="radio" name="deepPreset" value="720p" /> 720p</label>
+                <label><input type="radio" name="deepPreset" value="audio" /> Audio only</label>
+              </fieldset>
+              <div class="deep-video-destination" id="deepVideoDestination" hidden>
+                <span class="deep-video-folder-label" id="deepVideoFolderLabel">Downloads folder</span>
+                <button class="btn-small" id="chooseDeepVideoFolderBtn" type="button">Choose folder</button>
+              </div>
+              <div class="deep-video-progress" id="deepVideoProgress" hidden>
+                <div class="progress-bar-wrapper" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100">
+                  <div class="progress-bar" id="deepVideoProgressBar"></div>
+                </div>
+                <p class="deep-video-progress-text" id="deepVideoProgressText"></p>
+              </div>
+              <div class="deep-video-actions">
+                <button class="btn-primary" id="deepVideoDownloadBtn" type="button" disabled>Download</button>
+                <button class="btn-secondary" id="deepVideoCancelBtn" type="button" hidden>Cancel</button>
+                <button class="btn-secondary" id="deepVideoRetryBtn" type="button" hidden>Retry</button>
+              </div>
+              <div class="deep-video-install-guidance" id="deepVideoInstallGuidance" role="alert" hidden>
+                <p>Native helper not installed. See the extension readme for installation instructions.</p>
+              </div>
+            </div>
+
             <div class="results-container" id="videosContainer">
               <div class="empty-state">
                 <svg aria-hidden="true" focusable="false" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
@@ -320,6 +359,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="deep-video.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

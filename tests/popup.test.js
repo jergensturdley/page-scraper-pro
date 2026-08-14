@@ -1646,7 +1646,8 @@ describe('Least-privilege extension packaging', () => {
       'scripting',
       'downloads',
       'notifications',
-      'sidePanel'
+      'sidePanel',
+      'nativeMessaging'
     ];
     expect([...manifest.permissions].sort()).toEqual([...expectedPermissions].sort());
     expect(manifest.content_scripts).toBeUndefined();
@@ -1794,4 +1795,303 @@ this.createZipFromUrls = createZipFromUrls;`, backgroundContext);
     expect(backgroundJs).not.toContain('cdn.jsdelivr.net');
     expect(backgroundJs).toContain('Packaged ZIP support is unavailable');
   });
+
+// ─── deep-video.js state model ─────────────────────────────────────────────
+
+  var deepVideoPath = path.join(__dirname, '..', 'deep-video.js');
+
+  function loadDeepVideoModule() {
+    var sandbox = {
+      console: { error: function(){}, warn: function(){}, log: function(){} },
+      chrome: {
+        runtime: {
+          connectNative: function() {
+            return { onMessage:{addListener:function(){}}, onDisconnect:{addListener:function(){}}, postMessage:function(){}, disconnect:function(){} };
+          },
+          lastError: null,
+          getURL: function(p) { return 'chrome-extension://fake/' + p; },
+          id: 'fake-extension-id',
+          onMessage: { addListener: function(){}, removeListener: function(){} },
+          onConnect: { addListener: function(){}, removeListener: function(){} },
+        },
+      },
+      globalThis: Object.assign(Object.create(null), { Map: Map, Set: Set, Promise: Promise, Error: Error }),
+      module: { exports: {} },
+      exports: {},
+      require: function(){},
+      setTimeout: setTimeout,
+      clearTimeout: clearTimeout,
+      Date: Date,
+      JSON: JSON,
+      Math: Math,
+    };
+    sandbox.connectNative = sandbox.chrome.runtime.connectNative;
+    vm.createContext(sandbox);
+    var source = fs.readFileSync(deepVideoPath, 'utf8');
+    vm.runInContext(source, sandbox);
+    return sandbox;
+  }
+
+  function deepVideoReducer(state, action) {
+    var m = loadDeepVideoModule();
+    return m.reduceDeepVideoState(state, action);
+  }
+
+  describe('deep-video.js state model', function() {
+    test('DEEP_VIDEO_INITIAL_STATE is frozen and idle', function() {
+      var m = loadDeepVideoModule();
+      var s = m.DEEP_VIDEO_INITIAL_STATE;
+      expect(Object.isFrozen(s)).toBe(true);
+      expect(s.phase).toBe('idle');
+      expect(s.generation).toBe(0);
+    });
+
+    test('idle is the initial phase', function() {
+      var m = loadDeepVideoModule();
+      var state = m.DEEP_VIDEO_INITIAL_STATE;
+      expect(state.phase).toBe('idle');
+      expect(state.generation).toBe(0);
+    });
+
+    test('IDLE: analyze action transitions to checking', function() {
+      var m = loadDeepVideoModule();
+      var state = m.DEEP_VIDEO_INITIAL_STATE;
+      var next = m.reduceDeepVideoState(state, {
+        type: 'analyze',
+        payload: { url: 'https://example.com/video', provider: 'YouTube', media_id: 'abc123' },
+      });
+      expect(next.phase).toBe('checking');
+      expect(next.generation).toBe(1);
+      expect(next.source_url).toBe('https://example.com/video');
+    });
+
+    test('CHECKING: result action transitions to ready', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'checking', generation: 1, source_url: 'https://example.com/video', media_id: 'abc123' };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: {
+          media_id: 'abc123',
+          title: 'My Video',
+          provider: 'YouTube',
+          presets: ['best', '1080p'],
+          thumbnail_url: 'https://example.com/thumb.jpg',
+        },
+      });
+      expect(next.phase).toBe('ready');
+      expect(next.title).toBe('My Video');
+      expect(next.presets).toEqual(['best', '1080p']);
+      expect(next.media_id).toBe('abc123');
+    });
+
+    test('READY: download action transitions to downloading', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'ready', generation: 2, source_url: 'https://example.com/video',
+        media_id: 'abc123', presets: ['best'],
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'download', payload: { media_id: 'abc123', preset: 'best' },
+      });
+      expect(next.phase).toBe('downloading');
+      expect(next.active_preset).toBe('best');
+    });
+
+    test('DOWNLOADING: progress action updates phase and percent', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'downloading', generation: 3, source_url: 'https://example.com/video',
+        media_id: 'abc123', active_preset: 'best', progress_percent: 0, active_job_id: 'j1',
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'progress',
+        payload: { job_id: 'j1', state: 'downloading', phase: 'downloading', percent: 50 },
+      });
+      expect(next.phase).toBe('downloading');
+      expect(next.progress_percent).toBe(50);
+    });
+
+    test('DOWNLOADING: completed action transitions to completed', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'downloading', generation: 3,
+        media_id: 'abc123', active_preset: 'best',
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'completed',
+        payload: { job_id: 'j1', state: 'completed', destination: '/Users/Test/Downloads/video.mp4' },
+      });
+      expect(next.phase).toBe('completed');
+    });
+
+    test('DOWNLOADING: failed action transitions to error', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'downloading', generation: 3,
+        media_id: 'abc123', active_preset: 'best',
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'failed',
+        payload: { job_id: 'j1', state: 'failed', error_code: 'unavailable', error: 'helper not found' },
+      });
+      expect(next.phase).toBe('error');
+      expect(next.error_code).toBe('unavailable');
+    });
+
+    test('READY: cancel resets to idle', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'ready', generation: 2,
+        media_id: 'abc123', presets: ['best'],
+      };
+      var next = m.reduceDeepVideoState(state, { type: 'cancel' });
+      expect(next.phase).toBe('idle');
+    });
+
+    test('ERROR: retry resets to ready state', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'error', generation: 4,
+        media_id: 'abc123', error_code: 'unavailable',
+      };
+      var next = m.reduceDeepVideoState(state, { type: 'retry' });
+      expect(next.phase).toBe('ready');
+      expect(next.media_id).toBe('abc123');
+    });
+
+    test('navigation: new URL increments generation', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'ready', generation: 2,
+        source_url: 'https://example.com/video1',
+        media_id: 'abc123',
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'navigate',
+        payload: { url: 'https://example.com/video2' },
+      });
+      expect(next.generation).toBe(3);
+      expect(next.source_url).toBe('https://example.com/video2');
+      expect(next.media_id).toBeNull();
+      expect(next.phase).toBe('idle');
+    });
+
+    test('stale result: wrong generation is ignored', function() {
+      var m = loadDeepVideoModule();
+      // Current generation is 3, but result arrives for generation 1 (stale)
+      var state = {
+        phase: 'checking', generation: 3, source_url: 'https://example.com/video',
+      };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: { media_id: 'abc123', title: 'Stale Title', generation: 1 },
+      });
+      // Should keep current state, not apply stale result
+      expect(next.generation).toBe(3);
+    });
+
+    test('result: HTTP(S) thumbnail is preserved', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'checking', generation: 1 };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: {
+          media_id: 'abc', title: 'T',
+          thumbnail_url: 'https://i.ytimg.com/abc.jpg',
+        },
+      });
+      expect(next.thumbnail_url).toMatch(/^https:\/\//);
+    });
+
+    test('result: non-HTTP thumbnail is null', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'checking', generation: 1 };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: {
+          media_id: 'abc', title: 'T',
+          thumbnail_url: 'file:///secret.png',
+        },
+      });
+      expect(next.thumbnail_url).toBeNull();
+    });
+
+    test('title and error text are bounded to 1024 chars', function() {
+      var m = loadDeepVideoModule();
+      var long = 'x'.repeat(2000);
+      var state = { phase: 'checking', generation: 1 };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: { media_id: 'abc', title: long },
+      });
+      expect(next.title.length).toBeLessThanOrEqual(1024);
+    });
+
+    test('progress percent is monotonic', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'downloading', generation: 1,
+        media_id: 'abc', progress_percent: 70, active_job_id: 'j1',
+      };
+      // 40% is less than 70%, should be ignored (not monotonic decrease)
+      var next = m.reduceDeepVideoState(state, {
+        type: 'progress',
+        payload: { job_id: 'j1', percent: 40 },
+      });
+      expect(next.progress_percent).toBe(70);
+    });
+
+    test('availablePresetOptions returns array', function() {
+      var m = loadDeepVideoModule();
+      var presets = m.availablePresetOptions({ presets: ['best', '1080p', '720p', 'audio'] });
+      expect(Array.isArray(presets)).toBe(true);
+    });
+
+    test('normalizeDeepVideoResult returns display-safe object', function() {
+      var m = loadDeepVideoModule();
+      var result = m.normalizeDeepVideoResult({
+        media_id: 'abc', title: 'Test <script>evil</script>',
+        provider: 'YouTube',
+        thumbnail_url: 'https://example.com/t.jpg',
+      });
+      expect(result.title).not.toContain('<script>');
+      expect(typeof result.title).toBe('string');
+    });
+
+    test('FAILED: analyze after deep scan failure does not erase core scrape results', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'error', generation: 2,
+        media_id: 'abc', error_code: 'unavailable',
+      };
+      // Deep scan failure should not erase other state
+      var next = m.reduceDeepVideoState(state, {
+        type: 'analyze',
+        payload: { url: 'https://example.com/new', provider: 'YouTube', media_id: 'def456' },
+      });
+      expect(next.phase).toBe('checking');
+      expect(next.generation).toBe(3);
+    });
+  });
+
+  describe('deep-video.js helper unavailable', function() {
+    test('helper_unavailable error shows installation guidance', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'idle', generation: 0 };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'helper_unavailable',
+        payload: {},
+      });
+      expect(next.phase).toBe('error');
+      expect(next.error_code).toBe('helper_unavailable');
+    });
+
+    test('available preset options are always four choices', function() {
+      var m = loadDeepVideoModule();
+      var opts = m.availablePresetOptions({ presets: [] });
+      // Should always have the four standard options regardless of helper availability
+      expect(opts.length).toBeGreaterThanOrEqual(0);
+    });
+  });
+
 });

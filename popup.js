@@ -23,6 +23,156 @@ let scrapedData = {
   text: ''
 };
 
+// Deep video state — managed by the pure reducer from deep-video.js
+let deepVideoState =
+  typeof DEEP_VIDEO_INITIAL_STATE !== 'undefined'
+    ? DEEP_VIDEO_INITIAL_STATE
+    : { phase: 'idle', generation: 0 };
+let lastDeepVideoSafeAction = null; // { type, payload } — for Retry
+
+/**
+ * Send a command to the native helper via the background service worker.
+ * Returns a Promise that resolves with the response data.
+ */
+async function sendDeepVideoCommand(command, payload) {
+  return new Promise((resolve, reject) => {
+    if (!chrome || !chrome.runtime) {
+      reject(new Error('Extension context unavailable'));
+      return;
+    }
+    chrome.runtime.sendMessage({
+      action: 'deepVideoCommand',
+      command: command,
+      payload: payload || {}
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message || 'Message failed'));
+        return;
+      }
+      if (response && response.ok) {
+        resolve(response.data);
+      } else {
+        reject(new Error(response && response.error ? String(response.error) : 'Unknown error'));
+      }
+    });
+  });
+}
+
+/**
+ * Render the deep video panel based on the current state.
+ * Uses textContent and safe attribute setting — no innerHTML.
+ */
+function renderDeepVideo(state) {
+  if (!elements.deepVideoPanel) return;
+
+  // Show the panel whenever we have any non-idle state
+  const visible = state.phase !== 'idle';
+  elements.deepVideoPanel.hidden = !visible;
+
+  // Status text
+  if (elements.deepVideoStatus) {
+    var statusText = '';
+    switch (state.phase) {
+      case 'idle':        statusText = ''; break;
+      case 'checking':    statusText = 'Scanning for video content…'; break;
+      case 'ready':       statusText = 'Video found — choose quality and download'; break;
+      case 'downloading': statusText = 'Downloading…'; break;
+      case 'completed':   statusText = 'Download complete'; break;
+      case 'error':
+        if (state.error_code === 'helper_unavailable') {
+          statusText = 'Native helper not installed.';
+        } else {
+          statusText = 'Error: ' + (state.error || state.error_code || 'Unknown');
+        }
+        break;
+    }
+    elements.deepVideoStatus.textContent = statusText;
+  }
+
+  // Result (thumbnail + meta)
+  if (elements.deepVideoResult) {
+    var hasResult = state.phase === 'ready' || state.phase === 'downloading' ||
+                   state.phase === 'completed' || state.phase === 'error';
+    elements.deepVideoResult.hidden = !hasResult;
+    if (hasResult) {
+      if (elements.deepVideoTitle) {
+        elements.deepVideoTitle.textContent = state.title || '';
+      }
+      if (elements.deepVideoProvider) {
+        elements.deepVideoProvider.textContent = state.provider || '';
+      }
+      if (elements.deepVideoThumb) {
+        if (state.thumbnail_url) {
+          elements.deepVideoThumb.src = state.thumbnail_url;
+          elements.deepVideoThumb.alt = state.title || 'Video thumbnail';
+          elements.deepVideoThumb.hidden = false;
+        } else {
+          elements.deepVideoThumb.src = '';
+          elements.deepVideoThumb.alt = '';
+          elements.deepVideoThumb.hidden = true;
+        }
+      }
+    }
+  }
+
+  // Preset radio group
+  if (elements.deepVideoPresets) {
+    var showPresets = state.phase === 'ready';
+    elements.deepVideoPresets.hidden = !showPresets;
+  }
+
+  // Destination row
+  if (elements.deepVideoDestination) {
+    elements.deepVideoDestination.hidden = state.phase !== 'ready';
+  }
+
+  // Progress bar
+  if (elements.deepVideoProgress) {
+    var showProgress = state.phase === 'downloading' || state.phase === 'completed';
+    elements.deepVideoProgress.hidden = !showProgress;
+    if (showProgress && elements.deepVideoProgressBar) {
+      var pct = typeof state.progress_percent === 'number' ? state.progress_percent : 0;
+      elements.deepVideoProgressBar.style.width = pct + '%';
+      elements.deepVideoProgressBar.parentElement.setAttribute('aria-valuenow', String(pct));
+    }
+    if (elements.deepVideoProgressText) {
+      if (state.phase === 'downloading' && typeof state.progress_percent === 'number') {
+        elements.deepVideoProgressText.textContent = state.progress_percent + '%';
+      } else if (state.phase === 'completed') {
+        elements.deepVideoProgressText.textContent = 'Complete';
+      } else {
+        elements.deepVideoProgressText.textContent = '';
+      }
+    }
+  }
+
+  // Action buttons
+  if (elements.deepVideoDownloadBtn) {
+    elements.deepVideoDownloadBtn.disabled = state.phase !== 'ready';
+    elements.deepVideoDownloadBtn.hidden = state.phase === 'idle' || state.phase === 'error';
+  }
+  if (elements.deepVideoCancelBtn) {
+    elements.deepVideoCancelBtn.hidden = state.phase !== 'downloading';
+  }
+  if (elements.deepVideoRetryBtn) {
+    elements.deepVideoRetryBtn.hidden = state.phase !== 'error' || state.error_code === 'helper_unavailable';
+  }
+
+  // Installation guidance
+  if (elements.deepVideoInstallGuidance) {
+    elements.deepVideoInstallGuidance.hidden = state.phase !== 'error' || state.error_code !== 'helper_unavailable';
+  }
+}
+
+/** Get the currently selected preset radio value. */
+function getSelectedDeepPreset() {
+  var radios = document.querySelectorAll('input[name="deepPreset"]');
+  for (var i = 0; i < radios.length; i++) {
+    if (radios[i].checked) return radios[i].value;
+  }
+  return 'best';
+}
+
 let currentTabUrl = '';
 let currentTabId = null;
 let scrapedAt = null;
@@ -592,7 +742,26 @@ const elements = {
   settingsDialog: document.getElementById('settingsDialog'),
   settingsForm: document.getElementById('settingsForm'),
   closeSettingsBtn: document.getElementById('closeSettingsBtn'),
-  downloadPanel: document.getElementById('downloadPanel')
+  downloadPanel: document.getElementById('downloadPanel'),
+  // Deep video
+  deepScanBtn: document.getElementById('deepScanBtn'),
+  deepVideoPanel: document.getElementById('deepVideoPanel'),
+  deepVideoStatus: document.getElementById('deepVideoStatus'),
+  deepVideoResult: document.getElementById('deepVideoResult'),
+  deepVideoThumb: document.getElementById('deepVideoThumb'),
+  deepVideoTitle: document.getElementById('deepVideoTitle'),
+  deepVideoProvider: document.getElementById('deepVideoProvider'),
+  deepVideoPresets: document.getElementById('deepVideoPresets'),
+  deepVideoDestination: document.getElementById('deepVideoDestination'),
+  deepVideoFolderLabel: document.getElementById('deepVideoFolderLabel'),
+  deepVideoProgress: document.getElementById('deepVideoProgress'),
+  deepVideoProgressBar: document.getElementById('deepVideoProgressBar'),
+  deepVideoProgressText: document.getElementById('deepVideoProgressText'),
+  deepVideoDownloadBtn: document.getElementById('deepVideoDownloadBtn'),
+  deepVideoCancelBtn: document.getElementById('deepVideoCancelBtn'),
+  deepVideoRetryBtn: document.getElementById('deepVideoRetryBtn'),
+  deepVideoInstallGuidance: document.getElementById('deepVideoInstallGuidance'),
+  chooseDeepVideoFolderBtn: document.getElementById('chooseDeepVideoFolderBtn'),
 };
 
 function createDialogController(dialog) {
@@ -655,6 +824,113 @@ document.addEventListener('DOMContentLoaded', async () => {
   configureWindowControls();
   const [tabToken] = await Promise.all([getCurrentTab(), loadSettings()]);
   await restoreWorkspaceForCurrentTab(tabToken);
+
+  // ─── Deep video event listeners ───────────────────────────────────────────
+
+  // Listen for snapshot/progress events from the background
+  if (chrome && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message && message.action === 'deepVideoEvent') {
+        var event = message.event;
+        if (!event || typeof event !== 'object') return;
+        // Dispatch into the reducer
+        deepVideoState = reduceDeepVideoState(deepVideoState, event);
+        renderDeepVideo(deepVideoState);
+        sendResponse();
+      }
+    });
+  }
+
+  // Deep scan button
+  if (elements.deepScanBtn) {
+    elements.deepScanBtn.addEventListener('click', async () => {
+      if (deepVideoState.phase !== 'idle' && deepVideoState.phase !== 'error') return;
+      deepVideoState = reduceDeepVideoState(deepVideoState, {
+        type: 'analyze',
+        payload: { url: currentTabUrl, provider: null }
+      });
+      renderDeepVideo(deepVideoState);
+      try {
+        var result = await sendDeepVideoCommand('analyze', { url: currentTabUrl });
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'result',
+          payload: normalizeDeepVideoResult(result)
+        });
+      } catch (err) {
+        if (err.message && err.message.includes('not installed')) {
+          deepVideoState = reduceDeepVideoState(deepVideoState, { type: 'helper_unavailable', payload: {} });
+        } else {
+          deepVideoState = reduceDeepVideoState(deepVideoState, {
+            type: 'failed',
+            payload: { error_code: 'scan_failed', error: err.message }
+          });
+        }
+      }
+      renderDeepVideo(deepVideoState);
+    });
+  }
+
+  // Download button
+  if (elements.deepVideoDownloadBtn) {
+    elements.deepVideoDownloadBtn.addEventListener('click', async () => {
+      if (deepVideoState.phase !== 'ready') return;
+      var preset = getSelectedDeepPreset();
+      deepVideoState = reduceDeepVideoState(deepVideoState, {
+        type: 'download',
+        payload: { preset: preset }
+      });
+      renderDeepVideo(deepVideoState);
+      lastDeepVideoSafeAction = { type: 'download', payload: { preset: preset } };
+      try {
+        await sendDeepVideoCommand('download', {
+          media_id: deepVideoState.media_id,
+          preset: preset,
+          confirmed: true
+        });
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'completed',
+          payload: {}
+        });
+      } catch (err) {
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'failed',
+          payload: { error_code: 'download_failed', error: err.message }
+        });
+      }
+      renderDeepVideo(deepVideoState);
+    });
+  }
+
+  // Cancel button
+  if (elements.deepVideoCancelBtn) {
+    elements.deepVideoCancelBtn.addEventListener('click', async () => {
+      if (deepVideoState.phase !== 'downloading') return;
+      var jobId = deepVideoState.active_job_id || deepVideoState.media_id;
+      deepVideoState = reduceDeepVideoState(deepVideoState, { type: 'cancel', payload: {} });
+      renderDeepVideo(deepVideoState);
+      try {
+        await sendDeepVideoCommand('cancel', { job_id: jobId });
+      } catch (_) {
+        // Cancel is best-effort
+      }
+    });
+  }
+
+  // Retry button
+  if (elements.deepVideoRetryBtn) {
+    elements.deepVideoRetryBtn.addEventListener('click', () => {
+      if (deepVideoState.phase !== 'error') return;
+      deepVideoState = reduceDeepVideoState(deepVideoState, { type: 'retry', payload: {} });
+      renderDeepVideo(deepVideoState);
+    });
+  }
+
+  // Choose folder button (placeholder — folder selection would need chrome.downloads API)
+  if (elements.chooseDeepVideoFolderBtn) {
+    elements.chooseDeepVideoFolderBtn.addEventListener('click', () => {
+      showToast('Folder selection requires additional Chrome API permission', 'info');
+    });
+  }
 });
 
 // Get current tab info
