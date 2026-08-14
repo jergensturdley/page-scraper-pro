@@ -757,7 +757,10 @@ def _guard_ydl_urls(ydl: object) -> Iterator[None]:
 def _bounded_text(value: object, limit: int, fallback: str) -> str:
     if not isinstance(value, str):
         return fallback
-    cleaned = "".join(" " if ord(character) < 32 else character for character in value)
+    cleaned = "".join(
+        " " if ord(character) < 32 or ord(character) == 127 else character
+        for character in value
+    )
     cleaned = cleaned.strip()
     return (cleaned or fallback)[:limit]
 
