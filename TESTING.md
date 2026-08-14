@@ -2,31 +2,65 @@
 
 This file separates repeatable automated checks from Chrome-only acceptance checks. A checked automated result does **not** imply that the Chrome checklist has been run.
 
-## Automated verification record (2026-08-10)
+## Automated verification record (2026-08-14)
 
 Run from the repository root. These are the results recorded for the Task 10 verification pass:
 
 | Command | Result |
 | --- | --- |
-| `npm test -- --runInBand` | PASS — 1 suite, 112 tests |
+| `npm test -- --runInBand` | PASS — 1 suite, 181 tests |
 | `node --check popup.js` | PASS |
 | `node --check background.js` | PASS |
+| `node --check deep-video.js` | PASS |
+| `node --check native-client.js` | PASS |
 | `node --check libs/fflate.umd.js` | PASS |
 | `node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html` | PASS — `[]` (no findings) |
+| `python3 -m unittest discover -s native_host/tests -v` | PASS — all native_host tests |
+| `node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json')); if(m.host_permissions||m.content_scripts) process.exit(1); if(!m.permissions.includes('nativeMessaging')) process.exit(1)"` | PASS |
 | `git diff --check` | PASS |
-| `git status --short` | Expected worktree state — `M TESTING.md` |
+| `git status --short` | Expected worktree state — `M README.md M TESTING.md` |
 
 Additional packaging checks:
-
 - `JSON.parse` successfully parsed `manifest.json`.
 - `manifest.json` contains no `content.js`, `content.css`, or `content_scripts` reference.
-- The manifest uses `activeTab` and `scripting`; it does not request `<all_urls>` or declarative host access.
+- The manifest uses `activeTab`, `scripting`, and `nativeMessaging`; it does not request `<all_urls>` or declarative host access.
+
+### Automated test coverage
+
+**Extension tests (`tests/popup.test.js`, 181 tests):**
+- Popup URL helper regressions (6 skipped)
+- Popup UI bug fixes (4 skipped)
+- Rendered video security and controls (8 tests)
+- Image content classification (19 tests)
+- Scraper settings injection (13 tests)
+- Per-tab session workspace cache (20 tests)
+- Task 6 operation state and clipboard reporting (7 skipped)
+- Confirmed popup clipboard and ZIP actions (14 tests)
+- Task 7 keyboard accessibility (13 skipped)
+- Responsive dark Operate interface (10 skipped)
+- Accessible result feedback and export actions (7 skipped)
+- Least-privilege extension packaging (8 tests)
+- deep-video.js state model (22 tests)
+- deep-video.js helper unavailable (2 tests)
+- deep-video.js behavior and accessibility (14 tests)
+- Task 9: Tab/document lifecycle and session persistence (14 tests)
+
+**Native host tests (`native_host/tests/`):**
+- `test_config.py` — Config dataclasses, lock file, and environment detection
+- `test_redaction.py` — Structured redaction with regex and path-style patterns
+- `test_validation.py` — Message validation, bounded scalar/array/object, length limits
+- `test_protocol.py` — Framed read/write, EOF, oversized message rejection
+- `test_filenames.py` — Collision-safe sanitization and extension preservation
+- `test_finder.py` — Valid/invalid directory resolution, remembered path
+- `test_worker_analysis.py` — yt-dlp JSON extraction, malformed JSON handling
+- `test_worker_download.py` — Format resolution, progress relay, cancellation
+- `test_host.py` — Framed host loop, all command responses, error redacted
 
 ### Static responsive smoke check
 
 Chromium headless rendered `popup.html` at 320×700 and 760×800; screenshots were inspected from `snapshots/task10-popup-320x700.png` and `snapshots/task10-popup-760x800.png` (the directory is ignored by Git). The dark layout rendered at both sizes. At 320 px, `body.scrollWidth === innerWidth === 320`, so there was no body-level horizontal overflow; the narrow UI intentionally keeps dense control rows compact/scrollable. At 760 px, document and viewport widths were both 760 with no horizontal overflow.
 
-The static `file://` run logged the expected `chrome.tabs.onActivated` error because extension APIs do not exist in a normal headless file page. It found no independent markup/style console failure. This smoke check does **not** exercise extension APIs, popup lifecycle, side-panel capability detection, downloads, clipboard, storage, or injection. Those remain Chrome-manual checks below.
+The static `file://` run logged the expected `chrome.tabs.onActivated` error because extension APIs do not exist in a normal headless file page. It found no independent markup/style console failure. This smoke check does **not** exercise extension APIs, popup lifecycle, side-panel capability detection, downloads, clipboard, storage, injection, native messaging, or deep video functionality. Those remain Chrome-manual checks below.
 
 ## Manual Chrome acceptance checklist (pending)
 
@@ -50,19 +84,19 @@ Record Chrome version, OS, extension commit, test URLs, and pass/fail notes. Ins
 
 ### 3. Image content classification and filtering
 
-Use a controlled HTTP test page containing: a 16×16 `favicon.ico`, a small `site-logo.png`, a 1×1 `tracking-pixel.gif`, a small `tracker.png`, a genuinely tiny UI icon, a large editorial image, a large product/gallery image, a legitimate content image named `pixel-art.png`, and a normal-size image whose descriptive text contains “tracking”. Give each a visible label and known dimensions.
+Use a controlled HTTP test page containing: a 16x16 `favicon.ico`, a small `site-logo.png`, a 1x1 `tracking-pixel.gif`, a small `tracker.png`, a genuinely tiny UI icon, a large editorial image, a large product/gallery image, a legitimate content image named `pixel-art.png`, and a normal-size image whose descriptive text contains "tracking". Give each a visible label and known dimensions.
 
 - [ ] After scraping, confirm **Content** is the active default and its visible/total count is clear.
-- [ ] Confirm obvious favicon/logo/tracker/1×1 tracking samples are excluded from **Content**.
-- [ ] Confirm the large editorial/product samples and legitimate `pixel-art.png` are retained. A normal-size legitimate image must not be rejected only because “pixel” or “tracking” occurs in its name/alt text.
+- [ ] Confirm obvious favicon/logo/tracker/1x1 tracking samples are excluded from **Content**.
+- [ ] Confirm the large editorial/product samples and legitimate `pixel-art.png` are retained. A normal-size legitimate image must not be rejected only because "pixel" or "tracking" occurs in its name/alt text.
 - [ ] Choose **All assets** and confirm every captured asset, including excluded favicon/logo/tracker samples, becomes available.
-- [ ] Exercise **Large**, **XL**, and **Domain**, then type a search matching both alt text and a URL. Confirm “no filter matches” is distinguishable from “no scraped data.”
+- [ ] Exercise **Large**, **XL**, and **Domain**, then type a search matching both alt text and a URL. Confirm "no filter matches" is distinguishable from "no scraped data."
 - [ ] On a controlled page containing both navigation and ordinary content links, turn **Exclude navigation links** off and scrape again; confirm navigation links are included. Turn it on and run the next scrape; confirm navigation links are excluded while ordinary content links remain.
 
 ### 4. Per-tab workspace, invalidation, and clearing
 
 - [ ] In tab A, scrape a page, activate a non-default result tab, change the image filter, enter image and link searches, and select multiple images. Close/reopen the popup and side panel; confirm results, active result tab, filter, searches, and selections restore for tab A.
-- [ ] Scrape different content in tab B with different UI state. Switch A → B → A and confirm each tab restores only its own workspace with no cross-tab flash or late async overwrite.
+- [ ] Scrape different content in tab B with different UI state. Switch A -> B -> A and confirm each tab restores only its own workspace with no cross-tab flash or late async overwrite.
 - [ ] Repeat across two browser windows. Switching a tab in the inactive window must not replace the active window's workspace.
 - [ ] Start a scrape/restore in A and immediately activate B. Confirm pending A work is invalidated and cannot update B.
 - [ ] Navigate A to a new document (including same-tab cross-origin navigation), then return to the extension. Confirm A's old document workspace is rejected and a fresh invocation/scrape is required. A hash-only change should not incorrectly represent a different document.
@@ -84,14 +118,62 @@ Use a controlled HTTP test page containing: a 16×16 `favicon.ico`, a small `sit
 - [ ] Include iframes whose `width`/`height` attributes contain missing, negative, fractional, nonnumeric, extremely large, and malicious-looking string values. Confirm scraping and video rendering do not throw, distort/overflow the layout, or create unsafe actions; safe video open/copy actions still work.
 - [ ] On a page whose URL includes a path, query string, and hash, export/copy JSON. Confirm the top-level page URL is the complete original URL rather than only its origin.
 
-### 7. Keyboard and assistive technology
+### 7. Deep video download (native helper)
+
+Prerequisites: Install the native helper as described in README.md. Record the extension ID used.
+
+#### Helper installation and availability
+
+- [ ] With the helper installed, open the popup and navigate to the Videos tab. Confirm the **Deep Scan this page** button is visible.
+- [ ] Without the helper installed (or after uninstalling), open the popup. Confirm the Deep Scan button is hidden or the UI shows installation guidance when the button is present.
+- [ ] Run `python3 -m native_host.healthcheck`. Confirm it exits 0 and reports `yt-dlp` and `ffmpeg` availability.
+
+#### Analyze (public page discovery)
+
+Use a public YouTube video page.
+
+- [ ] Click **Deep Scan**. Confirm the UI transitions to a "Scanning..." status.
+- [ ] Confirm a valid scan result shows: thumbnail, title, provider name, and four preset options (best, 1080p, 720p, audio).
+- [ ] Confirm the thumbnail is a safe HTTP(S) image. Confirm the title is displayed as plain text (not HTML).
+- [ ] Confirm the scan does not use browser cookies (verify in the helper logs or network tab).
+- [ ] Scan a second public video page. Navigate back. Confirm each page's scan result is preserved per tab.
+
+#### Preset selection and download confirmation
+
+- [ ] Select the **1080p** preset and click **Download**. Confirm the OS-native save dialog opens for the destination folder.
+- [ ] After confirming the destination, confirm the UI transitions to a progress bar.
+- [ ] Confirm the progress bar updates as the download proceeds.
+- [ ] Confirm a completed download shows a completion message.
+- [ ] Cancel an in-progress download. Confirm the download stops and the UI returns to the ready state.
+- [ ] During a download, click Deep Scan again. Confirm the second request is rejected or queued (single-job behavior).
+- [ ] Try each preset (best, 1080p, 720p, audio). Confirm the correct format is used.
+
+#### Error handling
+
+- [ ] On an unsupported page (no video media found), confirm a clear "not found" or empty-state message appears.
+- [ ] On a page that causes a download error, confirm the error is shown with an actionable message.
+- [ ] If `ffmpeg` is missing, confirm a helpful message about the optional dependency.
+- [ ] Disconnect the network during a download. Confirm the failure is reported clearly and the UI recovers.
+
+#### Session persistence
+
+- [ ] With a ready deep-video result showing, close the popup. Reopen it on the same tab. Confirm the previous scan result (thumbnail, title, presets) is restored.
+- [ ] During an active download, close and reopen the popup. Confirm the progress resumes or the download is shown as still active.
+- [ ] Switch to a different tab while a download is active. Confirm the progress updates are still received.
+- [ ] Navigate the tab to a new page. Confirm the deep-video result is cleared (new scan required).
+
+#### No DRM bypass
+
+- [ ] Attempt to use the helper on a known DRM-protected or paywalled video page. Confirm the helper reports an appropriate error and does not extract protected content.
+
+### 8. Keyboard and assistive technology
 
 - [ ] Using the keyboard only, move through the result tablist with the supported arrow/Home/End behavior; confirm focus, `aria-selected`, tab panels, and activation stay synchronized.
 - [ ] Tab to every image filter and activate it with Space/Enter. Confirm pressed/active state is exposed.
 - [ ] Reach an image selection control by keyboard, toggle selection, and confirm its accessible name/state changes. Confirm ordinary image-link activation still opens the image; test the documented Shift-click selection behavior separately.
 - [ ] With VoiceOver, NVDA, or another screen reader, confirm scrape busy/success/failure status, copy/download feedback, filter/result changes where announced, and errors are understandable. Repeated toasts must reuse one live region rather than accumulate duplicate announcements.
 
-### 8. Settings and download dialogs
+### 9. Settings and download dialogs
 
 For both the settings dialog and download dialog:
 
@@ -100,13 +182,13 @@ For both the settings dialog and download dialog:
 - [ ] At narrow and wide widths, confirm the dialog fits the viewport and its contents scroll rather than cover inaccessible controls.
 - [ ] In settings, submit blank, zero, negative, fractional, nonnumeric, and non-finite/out-of-range numeric values. Confirm saving is blocked, the first invalid field is focused/identified, and persisted valid settings are unchanged. Then save valid positive integers and confirm they affect the next scrape.
 
-### 9. Clipboard context menu
+### 10. Clipboard context menu
 
 - [ ] Select page text, right-click, and invoke each Page Scraper Pro copy context-menu action that applies. Confirm the clipboard contains the expected selection/value and success notification appears only after the write completes.
 - [ ] Force clipboard failure in a disposable profile (deny access or use an inaccessible/restricted tab). Confirm no false success appears; an actionable failure notification is shown and the service worker remains responsive.
 - [ ] Repeat actions several times to confirm listeners/actions are not duplicated after service-worker restarts.
 
-### 10. Downloads and ZIP fallback
+### 11. Downloads and ZIP fallback
 
 Use a page with multiple same-name files, query-string image URLs, a failed/404 asset, and selected/unselected images. Keep `chrome://downloads` and the service-worker console open.
 

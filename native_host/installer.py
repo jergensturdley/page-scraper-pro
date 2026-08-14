@@ -35,6 +35,38 @@ _REQUIREMENTS_TEXT = """yt-dlp==2026.7.4 \\
 """
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
+# Fake yt_dlp stub written to the venv in --offline-test-fixture mode.
+# This module never ships with the real package.
+_FAKE_YT_DLP_STUB = """
+# Fake yt_dlp module for --offline-test-fixture mode.
+# Written by the installer; never appears in production installs.
+__version__ = "2026.7.4"
+version = ["2026.07.04"]
+
+class YoutubeDL:
+    def __init__(self, params=None, auto_init=True):
+        self.params = params or {}
+        self.to_stderr = lambda *a, **kw: None
+        self.to_console_header = lambda *a, **kw: None
+        if auto_init:
+            pass
+
+    def to_stdout(self, message, *args, **kwargs):
+        pass
+
+    def to_screen(self, message, *args, **kwargs):
+        pass
+
+    def report_warning(self, message, *args, **kwargs):
+        pass
+
+    def report_error(self, message, *args, **kwargs):
+        pass
+
+def main(argv=None):
+    raise SystemExit(0)
+"""
+
 
 class InstallError(RuntimeError):
     """Raised when installation cannot complete without weakening confinement."""
@@ -218,6 +250,7 @@ class Installer:
         runner: Callable[..., object] = subprocess.run,
         copy_tree: Callable[..., object] = shutil.copytree,
         health_probe: Callable[..., dict[str, object]] = check_health,
+        offline_test_fixture: bool = False,
     ):
         self.application_support_root = _validate_root(application_support_root, "application support root")
         self.manifest_root = _validate_root(manifest_root, "manifest root")
@@ -237,6 +270,7 @@ class Installer:
         self.runner = runner
         self.copy_tree = copy_tree
         self.health_probe = health_probe
+        self.offline_test_fixture = offline_test_fixture
         self.runtime_parent = self.application_support_root / _RUNTIME_PARENT_NAME
         self.runtime_dir = self.runtime_parent / _RUNTIME_NAME
         self.launcher_path = self.runtime_dir / _LAUNCHER_NAME
@@ -411,7 +445,34 @@ class Installer:
             ]
             if any(part == "sudo" for part in pip_command):
                 raise InstallError("privilege escalation is forbidden")
-            self.runner(pip_command, check=True)
+            if self.offline_test_fixture:
+                # Write a fake yt_dlp stub package with proper dist-info metadata
+                # so importlib.metadata.version("yt-dlp") returns the expected version.
+                import sys as _sys
+                major, minor = _sys.version_info[:2]
+                site_packages = (
+                    venv / "lib" / ("python" + str(major) + "." + str(minor)) / "site-packages"
+                )
+                yt_dlp_pkg = site_packages / "yt_dlp"
+                yt_dlp_pkg.mkdir(parents=True, exist_ok=True)
+                (yt_dlp_pkg / "__init__.py").write_text(_FAKE_YT_DLP_STUB, encoding="utf-8")
+                # Write dist-info so importlib.metadata can find the package.
+                dist_info_dir = site_packages / "yt_dlp-2026.7.4.dist-info"
+                dist_info_dir.mkdir(parents=True, exist_ok=True)
+                (dist_info_dir / "METADATA").write_text(
+                    "Metadata-Version: 2.1\n"
+                    "Name: yt-dlp\n"
+                    "Version: 2026.7.4\n"
+                    "Summary: A feature-rich command-line audio/video downloader.\n",
+                    encoding="utf-8",
+                )
+                (dist_info_dir / "top_level.txt").write_text("yt_dlp\n", encoding="utf-8")
+                (dist_info_dir / "RECORD").write_text(
+                    "yt_dlp/__init__.py,sha256=placeholder,0\n",
+                    encoding="utf-8",
+                )
+            else:
+                self.runner(pip_command, check=True)
             package_root = staging / "package"
             package_root.mkdir(mode=0o700)
             self.copy_tree(self.source_package, package_root / "native_host")
@@ -533,6 +594,10 @@ class Installer:
 
 
 def _default_home() -> Path:
+    # Allow tests to isolate the install from the real user home.
+    test_home = os.environ.get("PAGE_SCRAPER_TEST_HOME")
+    if test_home:
+        return Path(test_home)
     return Path.home()
 
 
@@ -548,12 +613,18 @@ def _ensure_cli_roots(home: Path) -> tuple[Path, Path]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install the Page Scraper Pro native helper")
     parser.add_argument("--extension-id", required=True)
+    parser.add_argument(
+        "--offline-test-fixture",
+        action="store_true",
+        help="Install a fake yt_dlp stub instead of fetching real packages (test mode only)",
+    )
     arguments = parser.parse_args(argv)
     try:
         app_root, manifest_root = _ensure_cli_roots(_default_home())
         Installer(
             application_support_root=app_root,
             manifest_root=manifest_root,
+            offline_test_fixture=arguments.offline_test_fixture,
         ).install(arguments.extension_id)
     except (InstallError, ValueError) as exc:
         print(f"install failed: {exc}", file=sys.stderr)

@@ -192,6 +192,10 @@ def check_health(
 
 
 def _default_home() -> Path:
+    # Allow tests to isolate healthcheck from the real user home.
+    test_home = os.environ.get("PAGE_SCRAPER_TEST_HOME")
+    if test_home:
+        return Path(test_home)
     return Path.home()
 
 
