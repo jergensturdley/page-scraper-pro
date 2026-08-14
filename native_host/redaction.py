@@ -13,28 +13,24 @@ _MAX_ENTRIES = 32
 _MAX_STRING_LENGTH = 512
 _MAX_KEY_LENGTH = 128
 _HEADER_RE = re.compile(
-    r"(?im)^(\s*(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]*"
+    r"(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]*"
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
-_SENSITIVE_KEYS = frozenset(
-    {
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        "destination",
-        "destination-path",
-        "file",
-        "filepath",
-        "file-path",
-        "filename",
-        "file-name",
-        "output",
-        "output-path",
-        "traceback",
-        "stacktrace",
-        "stack-trace",
-    }
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![~:/\w])/(?!/)[^\r\n\"'<>]*")
+_SENSITIVE_KEY_TOKENS = (
+    "authorization",
+    "cookie",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "destination",
+    "path",
+    "filename",
+    "output",
+    "file",
+    "traceback",
+    "stacktrace",
 )
 _URL_KEYS = frozenset({"url", "source-url", "webpage-url", "request-url"})
 
@@ -105,6 +101,7 @@ def redact_text(
             rf"{re.escape(home_text)}(?:{re.escape(os.sep)}[^\s\"'<>]*)?"
         )
         redacted = home_pattern.sub("~/<redacted>", redacted)
+    redacted = _ABSOLUTE_PATH_RE.sub(_REDACTED, redacted)
 
     if len(redacted) > max_length:
         redacted = redacted[: max_length - len(_TRUNCATED)] + _TRUNCATED
@@ -112,14 +109,19 @@ def redact_text(
 
 
 def _normalized_key(key: str) -> str:
-    return key.casefold().replace("_", "-")
+    return re.sub(r"[^a-z0-9]+", "-", key.casefold())
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = _normalized_key(key)
+    return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
 
 
 def _redact_value(value: object, *, key: str | None, home: Path, depth: int) -> object:
     if depth > _MAX_DEPTH:
         return _TRUNCATED
     normalized_key = _normalized_key(key) if key is not None else None
-    if normalized_key in _SENSITIVE_KEYS:
+    if key is not None and _is_sensitive_key(key):
         return _REDACTED
     if isinstance(value, str):
         if normalized_key in _URL_KEYS:
@@ -135,7 +137,7 @@ def _redact_value(value: object, *, key: str | None, home: Path, depth: int) -> 
         for raw_key, item in items[:_MAX_ENTRIES]:
             text_key = redact_text(str(raw_key), home=home)[:_MAX_KEY_LENGTH]
             redacted[text_key] = _redact_value(
-                item, key=text_key, home=home, depth=depth + 1
+                item, key=str(raw_key), home=home, depth=depth + 1
             )
         if len(items) > _MAX_ENTRIES:
             redacted[_TRUNCATED] = len(items) - _MAX_ENTRIES

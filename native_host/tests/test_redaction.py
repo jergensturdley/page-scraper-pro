@@ -40,6 +40,24 @@ class TextRedactionTests(unittest.TestCase):
             "Authorization: <redacted>\nCookie: <redacted>",
         )
 
+    def test_inline_authorization_and_cookie_values_are_redacted(self):
+        text = (
+            "request failed; Authorization: Bearer secret-token\n"
+            "retry with Cookie: session=private"
+        )
+        self.assertEqual(
+            redact_text(text, home=self.home),
+            "request failed; Authorization: <redacted>\n"
+            "retry with Cookie: <redacted>",
+        )
+
+    def test_absolute_paths_outside_home_are_redacted(self):
+        text = "failed to move /Volumes/M.2 2TB/output/private-video.mp4"
+        self.assertEqual(
+            redact_text(text, home=self.home),
+            "failed to move <redacted>",
+        )
+
     def test_home_paths_are_replaced_without_disclosing_filename(self):
         private_path = self.home / "Downloads" / "private-video.mp4"
         text = f"failed to move {private_path} during completion"
@@ -88,6 +106,21 @@ class MappingRedactionTests(unittest.TestCase):
                 "traceback": "<redacted>",
                 "url": "https://example.com/watch?<redacted>",
             },
+        )
+
+    def test_sensitive_key_variants_are_redacted_conservatively(self):
+        source = {
+            "destination_filename": "private-video.mp4",
+            "accessToken": "secret-token",
+            "client_secret": "secret-value",
+            "databasePassword": "secret-password",
+            "credentialValue": "secret-credential",
+            "outputFile": "/Volumes/private.mp4",
+            "resolved_path": "/tmp/private",
+        }
+        self.assertEqual(
+            redact_mapping(source, home=self.home),
+            {key: "<redacted>" for key in source},
         )
 
     def test_useful_scalar_context_is_preserved(self):
