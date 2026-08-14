@@ -129,17 +129,47 @@ def normalize_http_url(value: object) -> str:
     return normalized
 
 
-def validate_worker_job(value: object) -> dict[str, str]:
+def _validate_worker_path(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or not value
+        or len(value) > 4_096
+        or "\x00" in value
+    ):
+        raise ValueError(f"invalid worker {field}")
+    return value
+
+
+def validate_worker_job(value: object) -> dict[str, object]:
     """Validate the single-line protocol accepted by an isolated worker."""
     if not isinstance(value, dict):
         raise ValueError("worker job must be an object")
-    _require_exact_keys(value, {"operation", "url"}, "worker job")
-    if value["operation"] != "analyze":
-        raise ValueError("unknown worker operation")
-    return {
-        "operation": "analyze",
-        "url": normalize_http_url(value["url"]),
-    }
+    operation = value.get("operation")
+    if operation == "analyze":
+        _require_exact_keys(value, {"operation", "url"}, "worker job")
+        return {
+            "operation": "analyze",
+            "url": normalize_http_url(value["url"]),
+        }
+    if operation == "download":
+        _require_exact_keys(
+            value,
+            {"operation", "url", "media_id", "preset", "temp_dir", "destination"},
+            "worker job",
+        )
+        preset = value["preset"]
+        if not isinstance(preset, str) or preset not in ALLOWED_PRESETS:
+            raise ValueError("invalid download preset")
+        return {
+            "operation": "download",
+            "url": normalize_http_url(value["url"]),
+            "media_id": validate_request_id(value["media_id"]),
+            "preset": preset,
+            "temp_dir": _validate_worker_path(value["temp_dir"], "temporary directory"),
+            "destination": _validate_worker_path(value["destination"], "destination"),
+        }
+    raise ValueError("unknown worker operation")
 
 
 def validate_request_id(value: object) -> str:

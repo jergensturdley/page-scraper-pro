@@ -6,13 +6,19 @@ import ipaddress
 import json
 import math
 import os
+import secrets
+import shutil
 import socket
+import stat
 import sys
 import urllib.request
+from pathlib import Path
+import re
+import unicodedata
 from typing import Callable, Iterator, TextIO
 
 from .constants import MAX_MESSAGE_BYTES
-from .validation import normalize_http_url, validate_worker_job
+from .validation import normalize_http_url, validate_request_id, validate_worker_job
 
 
 PRESET_SELECTORS = {
@@ -27,6 +33,99 @@ _PROXY_OPTION_SUFFIX = "_proxy"
 _LIVE_STATES = frozenset(
     {"not_live", "is_live", "was_live", "post_live", "is_upcoming"}
 )
+_MAX_FILENAME_BYTES = 180
+_FILENAME_SEPARATORS_RE = re.compile(r"[/:\\]+")
+_FILENAME_WHITESPACE_RE = re.compile(r"\s+")
+_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
+
+
+def _truncate_utf8(value: str, byte_limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= byte_limit:
+        return value
+    return encoded[:byte_limit].decode("utf-8", "ignore")
+
+
+def _clean_filename_part(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = "".join(
+        " " if unicodedata.category(character).startswith("C") else character
+        for character in normalized
+    )
+    normalized = _FILENAME_SEPARATORS_RE.sub("-", normalized)
+    while ".." in normalized:
+        normalized = normalized.replace("..", ".")
+    normalized = _FILENAME_WHITESPACE_RE.sub(" ", normalized)
+    return normalized.strip(" .")
+
+
+def _bounded_filename(stem: str, extension: str, suffix: str = "") -> str:
+    ending = suffix + (f".{extension}" if extension else "")
+    stem_limit = max(1, _MAX_FILENAME_BYTES - len(ending.encode("utf-8")))
+    bounded_stem = _truncate_utf8(stem, stem_limit).rstrip(" .") or "download"
+    return bounded_stem + ending
+
+
+def sanitize_filename(title: object, media_id: str, extension: str) -> str:
+    """Create a visible, traversal-free basename bounded for common filesystems."""
+    clean_extension = extension.lstrip(".") if isinstance(extension, str) else ""
+    if _EXTENSION_RE.fullmatch(clean_extension) is None:
+        clean_extension = "bin"
+    stem = _clean_filename_part(title) or _clean_filename_part(media_id) or "download"
+    stem = stem.lstrip(".").strip() or _clean_filename_part(media_id) or "download"
+    return _bounded_filename(stem, clean_extension.lower())
+
+
+def _collision_filename(filename: str, index: int) -> str:
+    if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+        raise ValueError("filename must be a plain basename")
+    if filename in {".", ".."} or filename.startswith("."):
+        raise ValueError("filename must be visible")
+    if len(filename.encode("utf-8")) > _MAX_FILENAME_BYTES:
+        raise ValueError("filename is too long")
+    if index == 0:
+        return filename
+    suffix = Path(filename).suffix
+    extension = suffix[1:] if suffix else ""
+    stem = filename[:-len(suffix)] if suffix else filename
+    return _bounded_filename(stem, extension, f" ({index})")
+
+
+def collision_safe_path(directory: Path, filename: str) -> Path:
+    """Choose a currently unused basename beneath an existing directory."""
+    resolved_directory = Path(directory).resolve(strict=True)
+    if not resolved_directory.is_dir():
+        raise ValueError("download destination must be a directory")
+    for index in range(10_000):
+        candidate = resolved_directory / _collision_filename(filename, index)
+        if not os.path.lexists(candidate):
+            return candidate
+    raise AnalysisError("download_failed", "No safe output filename was available")
+
+
+def build_download_options(
+    preset: str, temp_dir: Path, progress_hook: object
+) -> dict[str, object]:
+    """Build fixed yt-dlp options from the extension-facing preset enum."""
+    if not isinstance(preset, str) or preset not in PRESET_SELECTORS:
+        raise ValueError("invalid download preset")
+    try:
+        resolved_temp = Path(temp_dir).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("temporary directory does not exist") from exc
+    if not resolved_temp.is_dir() or not os.access(resolved_temp, os.W_OK):
+        raise ValueError("temporary directory is not writable")
+    return {
+        "format": PRESET_SELECTORS[preset],
+        "outtmpl": str(resolved_temp / "%(id)s.%(ext)s"),
+        "noplaylist": True,
+        "continuedl": True,
+        "overwrites": False,
+        "progress_hooks": [progress_hook],
+        "postprocessor_hooks": [progress_hook],
+    }
 
 
 class AnalysisError(Exception):
@@ -40,6 +139,391 @@ class AnalysisError(Exception):
 
 class _UnsafeNetworkTarget(Exception):
     pass
+
+
+def _validated_download_directory(
+    value: Path, code: str, message: str
+) -> tuple[Path, os.stat_result]:
+    if not isinstance(value, Path) or not value.is_absolute() or ".." in value.parts:
+        raise AnalysisError(code, message)
+    try:
+        supplied = os.lstat(value)
+        if stat.S_ISLNK(supplied.st_mode) or not stat.S_ISDIR(supplied.st_mode):
+            raise AnalysisError(code, message)
+        resolved = value.resolve(strict=True)
+        opened = os.stat(resolved, follow_symlinks=False)
+    except AnalysisError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise AnalysisError(code, message) from exc
+    mode = stat.S_IMODE(opened.st_mode)
+    if not stat.S_ISDIR(opened.st_mode) or mode & 0o111 == 0 or mode & 0o222 == 0:
+        raise AnalysisError(code, message)
+    return resolved, opened
+
+
+def _same_directory(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _validated_empty_private_temp(value: Path) -> tuple[Path, os.stat_result]:
+    resolved, identity = _validated_download_directory(
+        value, "invalid_job", "The temporary directory was not valid"
+    )
+    mode = stat.S_IMODE(identity.st_mode)
+    if identity.st_uid != os.getuid() or mode & 0o077:
+        raise AnalysisError(
+            "invalid_job", "The temporary directory was not private"
+        )
+    try:
+        with os.scandir(resolved) as entries:
+            if next(entries, None) is not None:
+                raise AnalysisError(
+                    "invalid_job", "The temporary directory was not empty"
+                )
+    except OSError as exc:
+        raise AnalysisError(
+            "invalid_job", "The temporary directory could not be inspected"
+        ) from exc
+    return resolved, identity
+
+
+def _write_all_descriptor(descriptor: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        if written <= 0:
+            raise OSError("short write while staging completed download")
+        offset += written
+
+
+def _install_complete_file(
+    source: Path,
+    destination: Path,
+    destination_identity: os.stat_result,
+    filename: str,
+) -> Path:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = -1
+    source_fd = -1
+    staging_fd = -1
+    staging_name: str | None = None
+    final_name: str | None = None
+    staging_identity: os.stat_result | None = None
+    try:
+        directory_fd = os.open(destination, directory_flags)
+        opened_destination = os.fstat(directory_fd)
+        if not _same_directory(destination_identity, opened_destination):
+            raise AnalysisError(
+                "unsafe_destination", "The download destination changed"
+            )
+
+        source_before = os.lstat(source)
+        source_fd = os.open(source, os.O_RDONLY | nofollow)
+        source_opened = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(source_opened.st_mode)
+            or not _same_directory(source_before, source_opened)
+        ):
+            raise AnalysisError(
+                "unsafe_download_output", "The completed download changed"
+            )
+
+        staging_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+        for _ in range(32):
+            candidate = ".pagescraper-pro-" + secrets.token_hex(16) + ".tmp"
+            try:
+                staging_fd = os.open(
+                    candidate, staging_flags, 0o600, dir_fd=directory_fd
+                )
+                staging_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if staging_fd < 0 or staging_name is None:
+            raise AnalysisError(
+                "download_failed", "A destination staging file was unavailable"
+            )
+
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            _write_all_descriptor(staging_fd, chunk)
+        os.fsync(staging_fd)
+        staging_identity = os.fstat(staging_fd)
+        os.close(staging_fd)
+        staging_fd = -1
+
+        for index in range(10_000):
+            candidate = _collision_filename(filename, index)
+            try:
+                os.link(
+                    staging_name,
+                    candidate,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                final_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if final_name is None or staging_identity is None:
+            raise AnalysisError(
+                "download_failed", "No safe output filename was available"
+            )
+        try:
+            linked_identity = os.stat(
+                final_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+        except OSError as exc:
+            raise AnalysisError(
+                "unsafe_destination", "The final output path changed"
+            ) from exc
+        if not _same_directory(staging_identity, linked_identity):
+            raise AnalysisError(
+                "unsafe_destination", "The final output path changed"
+            )
+
+        try:
+            current_destination = os.stat(destination, follow_symlinks=False)
+        except OSError as exc:
+            raise AnalysisError(
+                "unsafe_destination", "The download destination changed"
+            ) from exc
+        if not _same_directory(opened_destination, current_destination):
+            raise AnalysisError(
+                "unsafe_destination", "The download destination changed"
+            )
+        os.unlink(staging_name, dir_fd=directory_fd)
+        staging_name = None
+        os.fsync(directory_fd)
+        try:
+            source.unlink()
+        except OSError:
+            pass
+        return destination / final_name
+    finally:
+        if staging_fd >= 0:
+            os.close(staging_fd)
+        if staging_name is not None and directory_fd >= 0:
+            try:
+                os.unlink(staging_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if source_fd >= 0:
+            os.close(source_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def _bounded_progress_number(value: object, maximum: float) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    number = min(number, maximum)
+    return int(number) if number.is_integer() else round(number, 2)
+
+
+def _progress_event(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    if status == "downloading":
+        phase = "downloading"
+    elif status in {"started", "processing"}:
+        phase = "processing"
+    elif status == "finished":
+        phase = "finalizing"
+    else:
+        return None
+    event: dict[str, object] = {"type": "progress", "phase": phase}
+    downloaded = _bounded_progress_number(value.get("downloaded_bytes"), 10**18)
+    total_value = value.get("total_bytes")
+    if total_value is None:
+        total_value = value.get("total_bytes_estimate")
+    total = _bounded_progress_number(total_value, 10**18)
+    if downloaded is not None and total not in (None, 0):
+        event["percent"] = min(100, round(float(downloaded) * 100 / float(total), 2))
+    elif phase == "finalizing":
+        event["percent"] = 100
+    speed = _bounded_progress_number(value.get("speed"), 10**15)
+    eta = _bounded_progress_number(value.get("eta"), _MAX_DURATION_SECONDS)
+    if speed is not None:
+        event["speed"] = speed
+    if eta is not None:
+        event["eta"] = eta
+    return event
+
+
+def _download_source(
+    info: object, temp_dir: Path, prepared_filename: object = None
+) -> Path:
+    candidates: list[object] = []
+    if isinstance(info, dict):
+        for key in ("filepath", "_filename"):
+            candidates.append(info.get(key))
+        candidates.append(prepared_filename)
+        requested = info.get("requested_downloads")
+        if isinstance(requested, list):
+            for item in reversed(requested):
+                if isinstance(item, dict):
+                    candidates.extend((item.get("filepath"), item.get("_filename")))
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        try:
+            supplied = Path(candidate)
+            metadata = os.lstat(supplied)
+            resolved = supplied.resolve(strict=True)
+            resolved.relative_to(temp_dir)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+            return resolved
+    raise AnalysisError(
+        "unsafe_download_output", "The completed download was outside its temporary directory"
+    )
+
+
+def _clear_temp_directory(temp_dir: Path) -> None:
+    try:
+        children = list(temp_dir.iterdir())
+    except OSError:
+        return
+    for child in children:
+        try:
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+        except OSError:
+            continue
+
+
+def _map_download_exception(exc: BaseException) -> AnalysisError:
+    if isinstance(exc, AnalysisError):
+        return exc
+    message = str(exc).lower()
+    if "ffmpeg" in message and any(
+        marker in message for marker in ("required", "not found", "missing", "not installed", "merge")
+    ):
+        return AnalysisError(
+            "ffmpeg_required", "ffmpeg is required for the selected download preset"
+        )
+    mapped = _map_exception(exc)
+    if mapped.code in {"unsafe_network_target", "invalid_url", "timeout", "drm_protected"}:
+        return mapped
+    return AnalysisError("download_failed", "Media download failed")
+
+
+def download_media(
+    url: str,
+    media_id: str,
+    preset: str,
+    temp_dir: Path,
+    destination: Path,
+    emit: Callable[[dict[str, object]], None],
+    ydl_factory: Callable[[dict[str, object]], object] | None = None,
+) -> dict[str, str]:
+    """Download one allowlisted preset and move one complete file into place."""
+    cleanup_temp: Path | None = None
+    cleanup_identity: os.stat_result | None = None
+    try:
+        normalized_url = normalize_http_url(url)
+        validated_media_id = validate_request_id(media_id)
+        resolved_temp, temp_identity = _validated_empty_private_temp(temp_dir)
+        cleanup_temp = resolved_temp
+        cleanup_identity = temp_identity
+        resolved_destination, destination_identity = _validated_download_directory(
+            destination,
+            "unsafe_destination",
+            "The download destination was not safe",
+        )
+        if resolved_destination == resolved_temp or resolved_destination.is_relative_to(
+            resolved_temp
+        ):
+            raise AnalysisError(
+                "unsafe_destination", "The download destination was not safe"
+            )
+        if not callable(emit):
+            raise AnalysisError("invalid_job", "The progress callback was not valid")
+        if ydl_factory is None:
+            try:
+                from yt_dlp import YoutubeDL
+            except ImportError as exc:
+                raise AnalysisError(
+                    "dependency_unavailable", "yt-dlp is not installed"
+                ) from exc
+            ydl_factory = YoutubeDL
+
+        def progress_hook(value: object) -> None:
+            event = _progress_event(value)
+            if event is not None:
+                emit(event)
+
+        options = build_download_options(preset, resolved_temp, progress_hook)
+        options.update({"quiet": True, "socket_timeout": 15})
+        prepared_filename: object = None
+        with _network_guard():
+            manager = ydl_factory(options)
+            ydl_context = (
+                manager
+                if hasattr(manager, "__enter__") and hasattr(manager, "__exit__")
+                else nullcontext(manager)
+            )
+            with ydl_context as ydl:
+                with _guard_ydl_urls(ydl):
+                    info = ydl.extract_info(normalized_url, download=True)
+                prepare_filename = getattr(ydl, "prepare_filename", None)
+                if callable(prepare_filename):
+                    try:
+                        prepared_filename = prepare_filename(info)
+                    except (OSError, TypeError, ValueError):
+                        prepared_filename = None
+
+        source = _download_source(info, resolved_temp, prepared_filename)
+        current_destination, current_identity = _validated_download_directory(
+            destination,
+            "unsafe_destination",
+            "The download destination was not safe",
+        )
+        if not _same_directory(destination_identity, current_identity):
+            raise AnalysisError(
+                "unsafe_destination", "The download destination changed"
+            )
+        extension = source.suffix.lstrip(".")
+        title = info.get("title") if isinstance(info, dict) else None
+        final_name = sanitize_filename(title, validated_media_id, extension)
+        final_path = _install_complete_file(
+            source, current_destination, current_identity, final_name
+        )
+        return {"filename": final_path.name, "directory": str(current_destination)}
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise _map_download_exception(exc) from exc
+    finally:
+        if cleanup_temp is not None and cleanup_identity is not None:
+            try:
+                current_temp, current_identity = _validated_download_directory(
+                    temp_dir, "invalid_job", "The temporary directory was not valid"
+                )
+            except AnalysisError:
+                pass
+            else:
+                if current_temp == cleanup_temp and _same_directory(
+                    cleanup_identity, current_identity
+                ):
+                    _clear_temp_directory(current_temp)
 
 
 def _is_global_address(value: str) -> bool:
@@ -499,19 +983,34 @@ def run_worker(input_stream: TextIO, output_stream: TextIO) -> int:
         message = (
             "Only public HTTP(S) URLs are allowed"
             if code == "invalid_url"
-            else "Worker job does not match the analyze schema"
+            else "Worker job does not match an allowed schema"
         )
         return _failed(output_stream, code, message)
 
-    _emit(output_stream, {"type": "phase", "phase": "analyzing"})
+    operation = job["operation"]
+    if operation == "analyze":
+        _emit(output_stream, {"type": "phase", "phase": "analyzing"})
     try:
-        result = analyze_url(job["url"])
+        if operation == "analyze":
+            result = analyze_url(job["url"])
+        else:
+            result = download_media(
+                job["url"],
+                job["media_id"],
+                job["preset"],
+                Path(job["temp_dir"]),
+                Path(job["destination"]),
+                lambda event: _emit(output_stream, event),
+            )
     except AnalysisError as exc:
+        if exc.code == "cancelled":
+            _emit(output_stream, {"type": "cancelled"})
+            return 1
         return _failed(output_stream, exc.code, exc.message)
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        mapped = _map_exception(exc)
+        mapped = _map_exception(exc) if operation == "analyze" else _map_download_exception(exc)
         return _failed(output_stream, mapped.code, mapped.message)
     _emit(output_stream, {"type": "completed", "result": result})
     return 0
