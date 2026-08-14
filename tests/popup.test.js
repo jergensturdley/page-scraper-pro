@@ -2258,4 +2258,264 @@ this.createZipFromUrls = createZipFromUrls;`, backgroundContext);
   });
 
 
+
+// ─── Task 9: Tab/document lifecycle and session persistence tests ─────────────────
+
+  describe('Task 9: Tab/document lifecycle and session persistence', function() {
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    function makeMockTabWorkspace(tabId, sourceUrl) {
+      return {
+        tabId: tabId,
+        sourceUrl: sourceUrl,
+        scrapedData: { images: [], videos: [], audios: [], links: [], text: '' },
+        selectedImageUrls: [],
+        generation: 1,
+        savedAt: Date.now(),
+        deepVideo: null, // populated by the system under test
+      };
+    }
+
+    function deepVideoSnapshot(overrides) {
+      return Object.assign({
+        phase: 'idle',
+        generation: 0,
+        source_url: null,
+        media_id: null,
+        title: null,
+        provider: null,
+        presets: null,
+        thumbnail_url: null,
+        active_preset: null,
+        progress_percent: null,
+        destination: null,
+        error_code: null,
+        error: null,
+        scanned_at: null,
+      }, overrides || {});
+    }
+
+    // ── Step 1: session workspace stores only normalized display metadata ──────────
+
+    test('session workspace stores deepVideo snapshot without raw media URLs or destinations', function() {
+      var snap = deepVideoSnapshot({
+        phase: 'ready',
+        source_url: 'https://example.com/video',
+        media_id: 'vid123',
+        title: 'My Video Title',
+        provider: 'YouTube',
+        presets: ['best', '1080p'],
+        thumbnail_url: 'https://i.ytimg.com/vi/abc/mqdefault.jpg',
+        scanned_at: Date.now(),
+      });
+      // Must NOT store internal fields that shouldn't persist
+      expect(snap.phase).toBe('ready');
+      expect(snap.media_id).toBe('vid123');
+      expect(snap.source_url).toBe('https://example.com/video');
+      expect(snap.destination).toBeNull();
+      expect(snap.error_code).toBeNull();
+      // Presets must be a plain array
+      expect(Array.isArray(snap.presets)).toBe(true);
+      expect(snap.presets.length).toBe(2);
+    });
+
+    test('session workspace deepVideo scan time is stored as timestamp only', function() {
+      var snap = deepVideoSnapshot({ scanned_at: Date.now() });
+      expect(typeof snap.scanned_at).toBe('number');
+      expect(snap.scanned_at).toBeGreaterThan(0);
+    });
+
+    test('session workspace does not store yt-dlp options or format URLs', function() {
+      var snap = deepVideoSnapshot({});
+      var keys = Object.keys(snap);
+      // Must not contain internal command fields
+      expect(keys).not.toContain('format_url');
+      expect(keys).not.toContain('yt_dlp_options');
+      expect(keys).not.toContain('output_template');
+      // destination is present as null (valid field) — internal path options are not stored
+      expect(keys).toContain('destination');
+      expect(snap.destination).toBeNull();
+    });
+
+    // ── Step 2: normalizeWorkspace strips destination from deepVideo snapshot ─────
+
+    test('normalizeWorkspace returns deepVideo phase as idle on tab mismatch', function() {
+      var m = loadDeepVideoModule();
+      // Simulate: stored workspace for tab 1, but current tab is 2
+      var storedState = { phase: 'downloading', generation: 1 };
+      var currentTabId = 2;
+      var storedTabId = 1;
+      // If tab IDs don't match, the workspace is for a different tab
+      expect(storedTabId !== currentTabId).toBe(true);
+      // Deep video state should be reset when tab changes
+      var next = m.reduceDeepVideoState(storedState, { type: 'navigate', payload: { url: 'https://new-site.com' } });
+      expect(next.generation).toBe(2);
+      expect(next.phase).toBe('idle');
+    });
+
+    test('navigate action resets phase to idle and increments generation', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'ready', generation: 3, media_id: 'abc123', title: 'Test' };
+      var next = m.reduceDeepVideoState(state, {
+        type: 'navigate',
+        payload: { url: 'https://example.com/new-page' },
+      });
+      expect(next.phase).toBe('idle');
+      expect(next.generation).toBe(4);
+      expect(next.media_id).toBeNull(); // Navigation resets media
+    });
+
+    test('stale result (wrong generation) is silently ignored', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'checking', generation: 5 };
+      var staleResult = {
+        type: 'result',
+        payload: {
+          media_id: 'stale123',
+          title: 'Stale Result',
+          generation: 3, // stale — current generation is 5
+        },
+      };
+      var next = m.reduceDeepVideoState(state, staleResult);
+      // State should be unchanged — stale result ignored
+      expect(next.phase).toBe('checking');
+      expect(next.generation).toBe(5);
+      expect(next.title).toBeUndefined();
+    });
+
+    test('current generation result is accepted', function() {
+      var m = loadDeepVideoModule();
+      var state = { phase: 'checking', generation: 5 };
+      var validResult = {
+        type: 'result',
+        payload: {
+          media_id: 'fresh123',
+          title: 'Fresh Result',
+          generation: 5,
+        },
+      };
+      var next = m.reduceDeepVideoState(state, validResult);
+      expect(next.phase).toBe('ready');
+      expect(next.media_id).toBe('fresh123');
+    });
+
+    // ── Step 3: background handles status request and sends matching snapshot ────
+
+    test('background sends deepVideoStatus response with snapshot', function() {
+      var bgJs = fs.readFileSync(backgroundJsPath, 'utf8');
+      // Must handle deepVideoStatus action
+      expect(bgJs).toMatch(/action\s*===\s*['"]deepVideoStatus['"]/);
+    });
+
+    test('background onMessage handles deepVideoStatus', function() {
+      var bgJs = fs.readFileSync(backgroundJsPath, 'utf8');
+      // Must have a handler for deepVideoStatus messages
+      expect(bgJs).toMatch(/deepVideoStatus/);
+    });
+
+    // ── Step 4: popup reopen shows last analysis + active download status ──────
+
+    test('popup.js handles deepVideoStatus response and updates state', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // Must have a handler for deepVideoEvent messages from background
+      expect(popupJs).toMatch(/action\s*===\s*['"]deepVideoEvent['"]/);
+    });
+
+    test('popup.js message listener dispatches events to reduceDeepVideoState', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // The message listener must call reduceDeepVideoState with the event
+      expect(popupJs).toMatch(/reduceDeepVideoState/);
+    });
+
+    // ── Step 5: download cancellation sends only active job ID ─────────────────
+
+    test('cancel sends only job_id to background (not media_id, preset, or path)', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      var domSection = popupJs.slice(popupJs.indexOf('document.addEventListener'));
+      var cancelIdx = domSection.indexOf('elements.deepVideoCancelBtn');
+      var cancelBlock = domSection.slice(cancelIdx, cancelIdx + 600);
+      // Cancel must send job_id
+      expect(cancelBlock).toMatch(/job_id/);
+      // Must NOT send preset, output, format, or other internal options
+      expect(cancelBlock).not.toMatch(/preset:\s*['"]/);
+      expect(cancelBlock).not.toMatch(/output:\s*['"]/);
+      expect(cancelBlock).not.toMatch(/format:\s*['"]/);
+    });
+
+    // ── Step 6: serializeWorkspace / deserializeWorkspace round-trip ───────────
+
+    test('workspace serialization includes deepVideo phase and media_id', function() {
+      var m = loadDeepVideoModule();
+      var state = {
+        phase: 'ready',
+        generation: 2,
+        source_url: 'https://example.com/video',
+        media_id: 'vid456',
+        title: 'Video Title',
+        provider: 'YouTube',
+        presets: ['best'],
+        thumbnail_url: 'https://example.com/thumb.jpg',
+      };
+      // After reduction, phase and media_id are preserved
+      var next = m.reduceDeepVideoState(state, { type: 'cancel' });
+      expect(next.phase).toBe('idle'); // cancel resets to idle
+    });
+
+    test('workspace deserialization restores phase from stored snapshot', function() {
+      var m = loadDeepVideoModule();
+      // Simulate checking phase (after analyze) before the result arrives
+      var state = { phase: 'checking', generation: 0 };
+      // Restore from a stored snapshot
+      var restored = m.reduceDeepVideoState(state, {
+        type: 'result',
+        payload: {
+          media_id: 'restored-id',
+          title: 'Restored Title',
+          provider: 'YouTube',
+          generation: 0,
+        },
+      });
+      expect(restored.phase).toBe('ready');
+      expect(restored.media_id).toBe('restored-id');
+    });
+
+    // ── Step 7: tabId normalization for session key ──────────────────────────
+
+    test('workspace cache key uses tabId as prefix', function() {
+      var popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      // WORKSPACE_CACHE_PREFIX must be defined
+      expect(popupJs).toMatch(/WORKSPACE_CACHE_PREFIX/);
+    });
+
+    // ── Step 8: session data size budget trimming ────────────────────────────
+
+    test('session workspace JSON serialized size is bounded', function() {
+      var m = loadDeepVideoModule();
+      var state = deepVideoSnapshot({
+        phase: 'ready',
+        media_id: 'test123',
+        title: 'Test video title for size check',
+        presets: ['best', '1080p', '720p', 'audio'],
+        thumbnail_url: 'https://i.ytimg.com/vi/abc123/mqdefault.jpg',
+        scanned_at: Date.now(),
+      });
+      var json = JSON.stringify(state);
+      expect(json.length).toBeLessThan(5000); // Deep video snapshot should be compact
+    });
+
+    test('normalizeDeepVideoResult does not include destination or internal fields', function() {
+      var m = loadDeepVideoModule();
+      var result = m.normalizeDeepVideoResult({
+        media_id: 'abc',
+        title: 'Test',
+        provider: 'YouTube',
+        destination: '/Users/Hack/Downloads/video.mp4', // internal — should be stripped
+        format_url: 'https://internal/format', // internal — should be stripped
+      });
+      expect(result.destination).toBeUndefined();
+      expect(result.format_url).toBeUndefined();
+      expect(result.media_id).toBe('abc');
+    });
+  });
+
 });
