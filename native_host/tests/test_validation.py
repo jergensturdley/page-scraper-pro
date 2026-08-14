@@ -120,6 +120,11 @@ class CommandValidationTests(unittest.TestCase):
             "http://[fc00::1]/video",
             "http://0.0.0.0/video",
             "http://224.0.0.1/video",
+            "http://localhost./video",
+            "http://127.1/video",
+            "http://2130706433/video",
+            "http://0x7f000001/video",
+            "http://127.000.000.001/video",
         )
         for url in blocked:
             with self.subTest(url=url):
@@ -130,6 +135,10 @@ class CommandValidationTests(unittest.TestCase):
         self.assertEqual(
             normalize_http_url("HTTPS://VIDEO.EXAMPLE.COM/watch?q=1#part"),
             "https://video.example.com/watch?q=1",
+        )
+        self.assertEqual(
+            normalize_http_url("https://public-media.example/video"),
+            "https://public-media.example/video",
         )
         self.assertEqual(normalize_http_url("http://8.8.8.8/video"), "http://8.8.8.8/video")
         self.assertEqual(
@@ -304,6 +313,7 @@ class EnvelopeValidationTests(unittest.TestCase):
         invalid_data = (
             {"number": float("nan")},
             {"number": float("inf")},
+            {"number": 10**400},
             {"tuple": (1, 2)},
             {1: "non-string key"},
             deep,
@@ -318,7 +328,14 @@ class EnvelopeValidationTests(unittest.TestCase):
 
     def test_rejects_nonfinite_progress_numbers(self):
         for field in ("percent", "speed", "eta"):
-            for value in (float("nan"), float("inf"), float("-inf"), True, "1"):
+            for value in (
+                float("nan"),
+                float("inf"),
+                float("-inf"),
+                True,
+                "1",
+                10**400,
+            ):
                 with self.subTest(field=field, value=value):
                     payload = {"job_id": "job_1", "phase": "downloading", field: value}
                     with self.assertRaises(ValueError):

@@ -29,6 +29,9 @@ _MAX_EVENT_ITEMS = 256
 _MAX_EVENT_NODES = 2_048
 _MAX_EVENT_STRING_LENGTH = 16_384
 _MAX_ERROR_MESSAGE_LENGTH = 1_000
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+_NUMERIC_HOST_RE = re.compile(r"^[0-9.]+$")
+_HEX_HOST_RE = re.compile(r"^0x[0-9a-f]+(?:\.|$)", re.IGNORECASE)
 
 
 def _require_exact_keys(
@@ -36,6 +39,24 @@ def _require_exact_keys(
 ) -> None:
     if set(value) != keys:
         raise ValueError(f"{label} fields do not match schema")
+
+
+def _is_strict_ipv4(hostname: str) -> bool:
+    parts = hostname.split(".")
+    return len(parts) == 4 and all(
+        part.isascii()
+        and part.isdecimal()
+        and (part == "0" or not part.startswith("0"))
+        and int(part) <= 255
+        for part in parts
+    )
+
+
+def _reject_ambiguous_numeric_host(hostname: str) -> None:
+    if _HEX_HOST_RE.match(hostname):
+        raise ValueError("ambiguous numeric hostnames are not allowed")
+    if _NUMERIC_HOST_RE.fullmatch(hostname) and not _is_strict_ipv4(hostname):
+        raise ValueError("ambiguous numeric hostnames are not allowed")
 
 
 def normalize_http_url(value: object) -> str:
@@ -72,6 +93,7 @@ def normalize_http_url(value: object) -> str:
         ".localhost"
     ):
         raise ValueError("local hostnames are not allowed")
+    _reject_ambiguous_numeric_host(host_without_final_dot)
     try:
         address = ipaddress.ip_address(host_without_final_dot)
     except ValueError:
@@ -169,10 +191,12 @@ def _validate_json_value(
     if value is None or isinstance(value, bool):
         return
     if type(value) is int:
+        if abs(value) > _MAX_SAFE_INTEGER:
+            raise ValueError("event integer exceeds the safe range")
         return
     if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError("event numbers must be finite")
+        if not math.isfinite(value) or abs(value) > _MAX_SAFE_INTEGER:
+            raise ValueError("event number is outside the finite safe range")
         return
     if isinstance(value, str):
         if len(value) > _MAX_EVENT_STRING_LENGTH:
@@ -224,6 +248,18 @@ def _validate_error(value: object) -> dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _validate_progress_number(value: object, field: str) -> int | float:
+    if type(value) is int:
+        if abs(value) > _MAX_SAFE_INTEGER:
+            raise ValueError(f"progress {field} exceeds the safe integer range")
+        return value
+    if type(value) is float:
+        if not math.isfinite(value) or abs(value) > _MAX_SAFE_INTEGER:
+            raise ValueError(f"progress {field} must be a bounded finite number")
+        return value
+    raise ValueError(f"progress {field} must be a number")
+
+
 def _validate_event_payload(
     event_type: str, payload: dict[object, object]
 ) -> dict[str, object]:
@@ -251,9 +287,7 @@ def _validate_event_payload(
             raise ValueError("invalid progress phase")
         validated = {"job_id": job_id, "phase": phase}
         for field in optional & keys:
-            number = payload[field]
-            if type(number) not in {int, float} or not math.isfinite(number):
-                raise ValueError(f"progress {field} must be a finite number")
+            number = _validate_progress_number(payload[field], field)
             if number < 0 or (field == "percent" and number > 100):
                 raise ValueError(f"progress {field} is outside its allowed range")
             validated[field] = number
