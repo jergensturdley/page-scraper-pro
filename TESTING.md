@@ -9,13 +9,15 @@ Run from the repository root. These are the results recorded for the Task 10 ver
 | Command | Result |
 | --- | --- |
 | `npm test -- --runInBand` | PASS — 1 suite, 181 tests |
+| `python3 -m unittest discover -s native_host/tests -v` | PASS — 193 native_host tests |
 | `node --check popup.js` | PASS |
 | `node --check background.js` | PASS |
 | `node --check deep-video.js` | PASS |
 | `node --check native-client.js` | PASS |
 | `node --check libs/fflate.umd.js` | PASS |
 | `node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html` | PASS — `[]` (no findings) |
-| `python3 -m unittest discover -s native_host/tests -v` | PASS — all native_host tests |
+| `python3 -m unittest discover -s native_host/tests -v` | PASS — 193 tests |
+| Installer offline-test-fixture lifecycle (`PAGE_SCRAPER_TEST_HOME`) | PASS — install → healthcheck → uninstall in temp HOME, no residual files |
 | `node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json')); if(m.host_permissions||m.content_scripts) process.exit(1); if(!m.permissions.includes('nativeMessaging')) process.exit(1)"` | PASS |
 | `git diff --check` | PASS |
 | `git status --short` | Expected worktree state — `M README.md M TESTING.md` |
@@ -45,7 +47,7 @@ Additional packaging checks:
 - deep-video.js behavior and accessibility (14 tests)
 - Task 9: Tab/document lifecycle and session persistence (14 tests)
 
-**Native host tests (`native_host/tests/`):**
+**Native host tests (`native_host/tests/`, 193 tests):**
 - `test_config.py` — Config dataclasses, lock file, and environment detection
 - `test_redaction.py` — Structured redaction with regex and path-style patterns
 - `test_validation.py` — Message validation, bounded scalar/array/object, length limits
@@ -55,6 +57,7 @@ Additional packaging checks:
 - `test_worker_analysis.py` — yt-dlp JSON extraction, malformed JSON handling
 - `test_worker_download.py` — Format resolution, progress relay, cancellation
 - `test_host.py` — Framed host loop, all command responses, error redacted
+- `test_installer.py` — Staged install, rollback, offline-test-fixture, hash lock
 
 ### Static responsive smoke check
 
