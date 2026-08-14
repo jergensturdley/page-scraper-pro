@@ -1,6 +1,11 @@
 import unittest
 
-from native_host.constants import ALLOWED_PRESETS, MAX_URL_LENGTH, PROTOCOL_VERSION
+from native_host.constants import (
+    ALLOWED_PRESETS,
+    MAX_MESSAGE_BYTES,
+    MAX_URL_LENGTH,
+    PROTOCOL_VERSION,
+)
 from native_host.validation import (
     make_error,
     make_response,
@@ -84,6 +89,10 @@ class CommandValidationTests(unittest.TestCase):
             "https://user@example.com/video",
             "https://user:pass@example.com/video",
             "https://example.com/" + ("x" * MAX_URL_LENGTH),
+            "https://example.com/a path",
+            "https://example.com/a\\path",
+            "https://example.com/<script>",
+            "https://example.com/%zz",
         )
         for url in urls:
             with self.subTest(url=url[:80]):
@@ -95,6 +104,37 @@ class CommandValidationTests(unittest.TestCase):
         self.assertEqual(
             normalize_http_url(url),
             "http://example.com/A/../Video?Token=A%2FB&x=1",
+        )
+
+    def test_rejects_local_and_non_global_network_targets(self):
+        blocked = (
+            "http://localhost/video",
+            "http://media.localhost/video",
+            "http://10.0.0.1/video",
+            "http://172.16.1.2/video",
+            "http://192.168.1.2/video",
+            "http://127.23.4.5/video",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/video",
+            "http://[fe80::1]/video",
+            "http://[fc00::1]/video",
+            "http://0.0.0.0/video",
+            "http://224.0.0.1/video",
+        )
+        for url in blocked:
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    normalize_http_url(url)
+
+    def test_accepts_public_dns_and_ip_targets(self):
+        self.assertEqual(
+            normalize_http_url("HTTPS://VIDEO.EXAMPLE.COM/watch?q=1#part"),
+            "https://video.example.com/watch?q=1",
+        )
+        self.assertEqual(normalize_http_url("http://8.8.8.8/video"), "http://8.8.8.8/video")
+        self.assertEqual(
+            normalize_http_url("https://[2606:4700:4700::1111]/video"),
+            "https://[2606:4700:4700::1111]/video",
         )
 
     def test_rejects_dangerous_download_fields(self):
@@ -154,57 +194,141 @@ class CommandValidationTests(unittest.TestCase):
 
 
 class EnvelopeValidationTests(unittest.TestCase):
+    def event(self, event_type, payload, event_id="event_1"):
+        return {
+            "version": 1,
+            "id": event_id,
+            "type": event_type,
+            "payload": payload,
+        }
+
     def test_validates_request_id(self):
         self.assertEqual(validate_request_id("A_b-9"), "A_b-9")
         with self.assertRaises(ValueError):
             validate_request_id("not valid")
 
     def test_builds_response_and_error_envelopes(self):
-        self.assertEqual(
-            make_response("req_1", {"healthy": True}),
-            {
-                "version": 1,
-                "id": "req_1",
-                "type": "response",
-                "payload": {"healthy": True},
-            },
-        )
-        self.assertEqual(
-            make_error("req_1", "invalid_request", "Request rejected"),
-            {
-                "version": 1,
-                "id": "req_1",
-                "type": "response",
-                "payload": {
-                    "ok": False,
-                    "error": {"code": "invalid_request", "message": "Request rejected"},
-                },
-            },
-        )
-
-    def test_validates_event_envelope_and_rejects_unknown_shapes(self):
-        event = {
+        success = {
             "version": 1,
-            "id": "job_1",
-            "type": "progress",
-            "payload": {"phase": "downloading"},
+            "id": "req_1",
+            "type": "response",
+            "payload": {"ok": True, "data": {"healthy": True}},
         }
-        self.assertEqual(validate_event(event), event)
+        failure = {
+            "version": 1,
+            "id": "req_1",
+            "type": "response",
+            "payload": {
+                "ok": False,
+                "error": {"code": "invalid_request", "message": "Request rejected"},
+            },
+        }
+        self.assertEqual(make_response("req_1", {"healthy": True}), success)
+        self.assertEqual(
+            make_error("req_1", "invalid_request", "Request rejected"), failure
+        )
+        self.assertEqual(validate_event(success), success)
+        self.assertEqual(validate_event(failure), failure)
+
+    def test_accepts_all_exact_event_payload_schemas(self):
+        events = (
+            self.event(
+                "progress",
+                {
+                    "job_id": "job_1",
+                    "phase": "downloading",
+                    "percent": 42.5,
+                    "speed": 1_024.0,
+                    "eta": 12,
+                },
+            ),
+            self.event("completed", {"job_id": "job_1", "result": {"file": "video.mp4"}}),
+            self.event(
+                "failed",
+                {
+                    "job_id": "job_1",
+                    "error": {"code": "network_error", "message": "Download failed"},
+                },
+            ),
+            self.event("cancelled", {"job_id": "job_1"}),
+        )
+        for event in events:
+            with self.subTest(event_type=event["type"]):
+                self.assertEqual(validate_event(event), event)
+
+    def test_rejects_unknown_or_invalid_outer_event_envelopes(self):
+        event = self.event("cancelled", {"job_id": "job_1"})
         invalid_events = (
             {**event, "type": "debug"},
             {**event, "version": 2},
             {**event, "payload": []},
             {**event, "extra": True},
+            {**event, "id": "bad id"},
         )
         for invalid in invalid_events:
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     validate_event(invalid)
 
+    def test_rejects_extra_missing_and_wrong_event_payload_fields(self):
+        invalid_events = (
+            self.event("response", {"ok": True, "data": {}, "extra": True}),
+            self.event("response", {"ok": False, "error": {"code": "bad"}}),
+            self.event("response", {"ok": "yes", "data": {}}),
+            self.event("progress", {"phase": "downloading"}),
+            self.event("progress", {"job_id": "job_1", "phase": "downloading", "x": 1}),
+            self.event("progress", {"job_id": "bad id", "phase": "downloading"}),
+            self.event("progress", {"job_id": "job_1", "phase": 1}),
+            self.event("progress", {"job_id": "job_1", "phase": "downloading", "percent": 101}),
+            self.event("progress", {"job_id": "job_1", "phase": "downloading", "speed": -1}),
+            self.event("completed", {"job_id": "job_1"}),
+            self.event("completed", {"job_id": "job_1", "result": []}),
+            self.event("failed", {"job_id": "job_1", "error": "failure"}),
+            self.event(
+                "failed",
+                {"job_id": "job_1", "error": {"code": "bad", "message": "x", "trace": "secret"}},
+            ),
+            self.event("cancelled", {"job_id": "job_1", "result": {}}),
+        )
+        for event in invalid_events:
+            with self.subTest(event=event):
+                with self.assertRaises(ValueError):
+                    validate_event(event)
+
+    def test_rejects_nonfinite_non_json_deep_or_oversized_event_data(self):
+        deep = {}
+        current = deep
+        for _ in range(20):
+            current["nested"] = {}
+            current = current["nested"]
+        invalid_data = (
+            {"number": float("nan")},
+            {"number": float("inf")},
+            {"tuple": (1, 2)},
+            {1: "non-string key"},
+            deep,
+            {"large": "x" * (MAX_MESSAGE_BYTES + 1)},
+        )
+        for data in invalid_data:
+            with self.subTest(data_type=type(data)):
+                with self.assertRaises(ValueError):
+                    validate_event(
+                        self.event("response", {"ok": True, "data": data})
+                    )
+
+    def test_rejects_nonfinite_progress_numbers(self):
+        for field in ("percent", "speed", "eta"):
+            for value in (float("nan"), float("inf"), float("-inf"), True, "1"):
+                with self.subTest(field=field, value=value):
+                    payload = {"job_id": "job_1", "phase": "downloading", field: value}
+                    with self.assertRaises(ValueError):
+                        validate_event(self.event("progress", payload))
+
     def test_response_builders_validate_arguments(self):
         invalid_calls = (
             lambda: make_response("bad id", {}),
             lambda: make_response("req_1", []),
+            lambda: make_response("req_1", {"bad": float("nan")}),
             lambda: make_error("req_1", "bad code!", "message"),
             lambda: make_error("req_1", "bad_code", 12),
         )

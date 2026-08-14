@@ -30,6 +30,20 @@ class FlushTrackingBytesIO(io.BytesIO):
         super().flush()
 
 
+class ShortWriter(io.BytesIO):
+    def write(self, data):
+        return super().write(data[:2])
+
+
+class InvalidWriter(io.BytesIO):
+    def __init__(self, result):
+        super().__init__()
+        self.result = result
+
+    def write(self, data):
+        return self.result
+
+
 class ProtocolTests(unittest.TestCase):
     def test_round_trip_message(self):
         message = {"version": 1, "id": "req_1", "type": "health", "payload": {}}
@@ -93,10 +107,59 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             read_message(wire)
 
+    def test_rejects_nonfinite_json_constants(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                payload = ('{"value":' + constant + '}').encode("ascii")
+                wire = io.BytesIO(struct.pack("<I", len(payload)) + payload)
+                with self.assertRaises(ProtocolError):
+                    read_message(wire)
+
+    def test_rejects_integer_above_decoder_digit_limit(self):
+        payload = ('{"value":' + ("9" * 5_000) + '}').encode("ascii")
+        wire = io.BytesIO(struct.pack("<I", len(payload)) + payload)
+        with self.assertRaises(ProtocolError):
+            read_message(wire)
+
+    def test_rejects_excessively_deep_json(self):
+        payload = (("{\"nested\":" * 2_000) + "null" + ("}" * 2_000)).encode("ascii")
+        wire = io.BytesIO(struct.pack("<I", len(payload)) + payload)
+        with self.assertRaises(ProtocolError):
+            read_message(wire)
+
     def test_write_rejects_oversized_message(self):
         message = {"data": "x" * MAX_MESSAGE_BYTES}
         with self.assertRaises(FrameTooLarge):
             write_message(io.BytesIO(), message)
+
+    def test_write_rejects_nonfinite_numbers(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(ProtocolError):
+                    write_message(io.BytesIO(), {"value": value})
+
+    def test_write_rejects_recursive_message(self):
+        message = {}
+        current = message
+        for _ in range(2_000):
+            child = {}
+            current["nested"] = child
+            current = child
+        with self.assertRaises(ProtocolError):
+            write_message(io.BytesIO(), message)
+
+    def test_write_retries_short_writes(self):
+        message = {"ok": True}
+        wire = ShortWriter()
+        write_message(wire, message)
+        wire.seek(0)
+        self.assertEqual(read_message(wire), message)
+
+    def test_write_rejects_invalid_write_counts(self):
+        for result in (0, None, -1, 10_000, "1"):
+            with self.subTest(result=result):
+                with self.assertRaises(ProtocolError):
+                    write_message(InvalidWriter(result), {"ok": True})
 
     def test_write_rejects_non_object_and_flushes_valid_frame(self):
         with self.assertRaises(ProtocolError):

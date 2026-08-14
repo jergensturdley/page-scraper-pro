@@ -1,11 +1,15 @@
 """Strict schemas for the native helper protocol."""
 
+import ipaddress
+import json
+import math
 import re
 from urllib.parse import urlsplit, urlunsplit
 
 from .constants import (
     ALLOWED_COMMANDS,
     ALLOWED_PRESETS,
+    MAX_MESSAGE_BYTES,
     MAX_URL_LENGTH,
     PROTOCOL_VERSION,
     REQUEST_ID_PATTERN,
@@ -13,21 +17,41 @@ from .constants import (
 
 _REQUEST_ID_RE = re.compile(REQUEST_ID_PATTERN)
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_EVENT_TYPES = frozenset({"response", "progress", "completed", "failed", "cancelled"})
+_PHASE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_BAD_URI_CHARACTER_RE = re.compile(r"[<>\"{}|^`]")
+_BAD_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_EVENT_TYPES = frozenset(
+    {"response", "progress", "completed", "failed", "cancelled"}
+)
 _ENVELOPE_KEYS = {"version", "id", "type", "payload"}
+_MAX_EVENT_DEPTH = 10
+_MAX_EVENT_ITEMS = 256
+_MAX_EVENT_NODES = 2_048
+_MAX_EVENT_STRING_LENGTH = 16_384
+_MAX_ERROR_MESSAGE_LENGTH = 1_000
 
 
-def _require_exact_keys(value: dict[object, object], keys: set[str], label: str) -> None:
+def _require_exact_keys(
+    value: dict[object, object], keys: set[str], label: str
+) -> None:
     if set(value) != keys:
         raise ValueError(f"{label} fields do not match schema")
 
 
 def normalize_http_url(value: object) -> str:
-    """Validate and normalize an HTTP(S) URL without resolving it."""
+    """Validate a public HTTP(S) URL without resolving or requesting it."""
     if not isinstance(value, str) or not value or len(value) > MAX_URL_LENGTH:
         raise ValueError("URL must be a bounded string")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ValueError("URL contains control characters")
+    if (
+        any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+        or "\\" in value
+        or _BAD_URI_CHARACTER_RE.search(value) is not None
+        or _BAD_PERCENT_ESCAPE_RE.search(value) is not None
+    ):
+        raise ValueError("URL contains malformed URI characters")
     try:
         parsed = urlsplit(value)
         scheme = parsed.scheme.lower()
@@ -41,10 +65,30 @@ def normalize_http_url(value: object) -> str:
         raise ValueError("URL must include a host")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("URL credentials are not allowed")
-    if any(character.isspace() or ord(character) < 32 for character in hostname):
-        raise ValueError("URL host is malformed")
 
     normalized_host = hostname.lower()
+    host_without_final_dot = normalized_host.rstrip(".")
+    if host_without_final_dot == "localhost" or host_without_final_dot.endswith(
+        ".localhost"
+    ):
+        raise ValueError("local hostnames are not allowed")
+    try:
+        address = ipaddress.ip_address(host_without_final_dot)
+    except ValueError:
+        address = None
+    if address is not None and (
+        not address.is_global
+        or address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    ):
+        raise ValueError("non-global IP addresses are not allowed")
+
+    # Task 3 network fetches must revalidate every resolved and redirected IP
+    # immediately before connection; syntax checks alone cannot stop DNS rebinding.
     if ":" in normalized_host and not normalized_host.startswith("["):
         normalized_host = f"[{normalized_host}]"
     netloc = normalized_host if port is None else f"{normalized_host}:{port}"
@@ -61,7 +105,9 @@ def validate_request_id(value: object) -> str:
     return value
 
 
-def _validate_payload(command_type: str, payload: dict[object, object]) -> dict[str, object]:
+def _validate_payload(
+    command_type: str, payload: dict[object, object]
+) -> dict[str, object]:
     if command_type in {"health", "choose_directory", "status"}:
         _require_exact_keys(payload, set(), f"{command_type} payload")
         return {}
@@ -112,33 +158,153 @@ def validate_command(message: object) -> dict[str, object]:
     }
 
 
+def _validate_json_value(
+    value: object, depth: int = 0, node_count: list[int] | None = None
+) -> None:
+    if node_count is None:
+        node_count = [0]
+    node_count[0] += 1
+    if node_count[0] > _MAX_EVENT_NODES or depth > _MAX_EVENT_DEPTH:
+        raise ValueError("event data exceeds structural limits")
+    if value is None or isinstance(value, bool):
+        return
+    if type(value) is int:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("event numbers must be finite")
+        return
+    if isinstance(value, str):
+        if len(value) > _MAX_EVENT_STRING_LENGTH:
+            raise ValueError("event string exceeds maximum length")
+        return
+    if isinstance(value, list):
+        if len(value) > _MAX_EVENT_ITEMS:
+            raise ValueError("event list has too many items")
+        for item in value:
+            _validate_json_value(item, depth + 1, node_count)
+        return
+    if isinstance(value, dict):
+        if len(value) > _MAX_EVENT_ITEMS:
+            raise ValueError("event object has too many fields")
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > _MAX_EVENT_STRING_LENGTH:
+                raise ValueError("event object keys must be bounded strings")
+            _validate_json_value(item, depth + 1, node_count)
+        return
+    raise ValueError("event data is not JSON-safe")
+
+
+def _validate_bounded_json(value: object) -> None:
+    _validate_json_value(value)
+    try:
+        encoded = json.dumps(
+            value, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("event data is not JSON-safe") from exc
+    if len(encoded) > MAX_MESSAGE_BYTES:
+        raise ValueError("event data exceeds maximum encoded size")
+
+
+def _validate_error(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("error must be an object")
+    _require_exact_keys(value, {"code", "message"}, "error")
+    code = value["code"]
+    message = value["message"]
+    if not isinstance(code, str) or _ERROR_CODE_RE.fullmatch(code) is None:
+        raise ValueError("invalid error code")
+    if (
+        not isinstance(message, str)
+        or not message
+        or len(message) > _MAX_ERROR_MESSAGE_LENGTH
+    ):
+        raise ValueError("error message must be a bounded non-empty string")
+    return {"code": code, "message": message}
+
+
+def _validate_event_payload(
+    event_type: str, payload: dict[object, object]
+) -> dict[str, object]:
+    if event_type == "response":
+        if payload.get("ok") is True:
+            _require_exact_keys(payload, {"ok", "data"}, "response payload")
+            data = payload["data"]
+            if not isinstance(data, dict):
+                raise ValueError("response data must be an object")
+            validated = {"ok": True, "data": data}
+        elif payload.get("ok") is False:
+            _require_exact_keys(payload, {"ok", "error"}, "response payload")
+            validated = {"ok": False, "error": _validate_error(payload["error"])}
+        else:
+            raise ValueError("response ok must be a boolean")
+    elif event_type == "progress":
+        required = {"job_id", "phase"}
+        optional = {"percent", "speed", "eta"}
+        keys = set(payload)
+        if not required <= keys or not keys <= required | optional:
+            raise ValueError("progress payload fields do not match schema")
+        job_id = validate_request_id(payload["job_id"])
+        phase = payload["phase"]
+        if not isinstance(phase, str) or _PHASE_RE.fullmatch(phase) is None:
+            raise ValueError("invalid progress phase")
+        validated = {"job_id": job_id, "phase": phase}
+        for field in optional & keys:
+            number = payload[field]
+            if type(number) not in {int, float} or not math.isfinite(number):
+                raise ValueError(f"progress {field} must be a finite number")
+            if number < 0 or (field == "percent" and number > 100):
+                raise ValueError(f"progress {field} is outside its allowed range")
+            validated[field] = number
+    elif event_type == "completed":
+        _require_exact_keys(payload, {"job_id", "result"}, "completed payload")
+        result = payload["result"]
+        if not isinstance(result, dict):
+            raise ValueError("completed result must be an object")
+        validated = {
+            "job_id": validate_request_id(payload["job_id"]),
+            "result": result,
+        }
+    elif event_type == "failed":
+        _require_exact_keys(payload, {"job_id", "error"}, "failed payload")
+        validated = {
+            "job_id": validate_request_id(payload["job_id"]),
+            "error": _validate_error(payload["error"]),
+        }
+    elif event_type == "cancelled":
+        _require_exact_keys(payload, {"job_id"}, "cancelled payload")
+        validated = {"job_id": validate_request_id(payload["job_id"])}
+    else:
+        raise ValueError("unknown event")
+    _validate_bounded_json(validated)
+    return validated
+
+
 def make_response(request_id: str, payload: dict[str, object]) -> dict[str, object]:
-    """Build a command response envelope."""
-    validated_id = validate_request_id(request_id)
-    if not isinstance(payload, dict):
-        raise ValueError("response payload must be an object")
-    return {
+    """Build a successful command response envelope."""
+    event = {
         "version": PROTOCOL_VERSION,
-        "id": validated_id,
+        "id": validate_request_id(request_id),
         "type": "response",
-        "payload": payload,
+        "payload": {"ok": True, "data": payload},
     }
+    return validate_event(event)
 
 
 def make_error(request_id: str, code: str, message: str) -> dict[str, object]:
     """Build a stable structured command rejection."""
-    if not isinstance(code, str) or _ERROR_CODE_RE.fullmatch(code) is None:
-        raise ValueError("invalid error code")
-    if not isinstance(message, str) or not message:
-        raise ValueError("error message must be a non-empty string")
-    return make_response(
-        request_id,
-        {"ok": False, "error": {"code": code, "message": message}},
-    )
+    event = {
+        "version": PROTOCOL_VERSION,
+        "id": validate_request_id(request_id),
+        "type": "response",
+        "payload": {"ok": False, "error": {"code": code, "message": message}},
+    }
+    return validate_event(event)
 
 
 def validate_event(message: object) -> dict[str, object]:
-    """Validate the common envelope for a helper-to-extension event."""
+    """Validate an exact helper-to-extension event schema."""
     if not isinstance(message, dict):
         raise ValueError("event must be an object")
     _require_exact_keys(message, _ENVELOPE_KEYS, "event")
@@ -151,9 +317,11 @@ def validate_event(message: object) -> dict[str, object]:
     payload = message["payload"]
     if not isinstance(payload, dict):
         raise ValueError("event payload must be an object")
-    return {
+    validated = {
         "version": PROTOCOL_VERSION,
         "id": event_id,
         "type": event_type,
-        "payload": dict(payload),
+        "payload": _validate_event_payload(event_type, payload),
     }
+    _validate_bounded_json(validated)
+    return validated
