@@ -505,7 +505,29 @@ function normalizeWorkspace(value, expectedTabId, expectedSourceUrl) {
     linkSearch: typeof value.linkSearch === 'string' ? value.linkSearch : '',
     selectedImageUrls: Array.isArray(value.selectedImageUrls)
       ? [...new Set(value.selectedImageUrls.map(normalizeImageUrl).filter(url => imageUrls.has(url)))]
-      : []
+      : [],
+    // Deep video: restore only display metadata (no active job IDs, progress, or destinations)
+    deepVideo: (function() {
+      var dv = value && value.deepVideo;
+      if (!dv || typeof dv !== 'object') return null;
+      // Only restore phases that represent a completed or error scan (not active jobs)
+      var validPhase = dv.phase === 'ready' || dv.phase === 'error' || dv.phase === 'completed';
+      if (!validPhase) return null;
+      return {
+        phase: dv.phase,
+        generation: typeof dv.generation === 'number' ? dv.generation : 0,
+        source_url: typeof dv.source_url === 'string' ? dv.source_url : null,
+        media_id: typeof dv.media_id === 'string' ? dv.media_id : null,
+        title: typeof dv.title === 'string' ? dv.title : null,
+        provider: typeof dv.provider === 'string' ? dv.provider : null,
+        presets: Array.isArray(dv.presets) ? dv.presets.slice() : null,
+        thumbnail_url: typeof dv.thumbnail_url === 'string' ? dv.thumbnail_url : null,
+        active_preset: typeof dv.active_preset === 'string' ? dv.active_preset : null,
+        error_code: typeof dv.error_code === 'string' ? dv.error_code : null,
+        error: typeof dv.error === 'string' ? dv.error : null,
+        scanned_at: typeof dv.scanned_at === 'number' && dv.scanned_at > 0 ? dv.scanned_at : null,
+      };
+    })(),
   };
 }
 
@@ -825,6 +847,35 @@ document.addEventListener('DOMContentLoaded', async () => {
   const [tabToken] = await Promise.all([getCurrentTab(), loadSettings()]);
   await restoreWorkspaceForCurrentTab(tabToken);
 
+  // Sync deep video state with native client snapshot on popup open.
+  // This catches active downloads that were started before the popup was opened.
+  if (chrome && chrome.runtime) {
+    chrome.runtime.sendMessage({ action: 'deepVideoStatus' }).then(resp => {
+      if (!resp || !resp.ok) return;
+      var snap = resp.snapshot;
+      if (!snap || typeof snap !== 'object' || !snap.state) return;
+      // Translate native state into deep-video events
+      if (snap.state === 'downloading' && snap.job_id) {
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'progress',
+          payload: { job_id: snap.job_id, percent: typeof snap.percent === 'number' ? snap.percent : 0 }
+        });
+      } else if (snap.state === 'completed' && snap.job_id) {
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'completed',
+          payload: { job_id: snap.job_id }
+        });
+      } else if (snap.state === 'failed' && snap.job_id) {
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'failed',
+          payload: { error_code: snap.error_code || 'download_failed', error: snap.error_code || 'Download failed' }
+        });
+      }
+      // If state is 'idle' or 'scanning', leave cached deep video state unchanged
+      renderDeepVideo(deepVideoState);
+    }).catch(() => {});
+  }
+
   // ─── Deep video event listeners ───────────────────────────────────────────
 
   // Listen for snapshot/progress events from the background
@@ -1065,7 +1116,24 @@ function getWorkspaceSnapshot() {
     currentImageFilter,
     imageSearch: elements.imageFilter ? elements.imageFilter.value : '',
     linkSearch: elements.linkFilter ? elements.linkFilter.value : '',
-    selectedImageUrls: [...selectedImages]
+    selectedImageUrls: [...selectedImages],
+    // Deep video: only persist display metadata and scan metadata (not active job IDs, progress, or destinations)
+    deepVideo: {
+      phase: deepVideoState.phase,
+      generation: deepVideoState.generation,
+      source_url: deepVideoState.source_url,
+      media_id: deepVideoState.media_id,
+      title: deepVideoState.title,
+      provider: deepVideoState.provider,
+      presets: Array.isArray(deepVideoState.presets) ? deepVideoState.presets.slice() : null,
+      thumbnail_url: deepVideoState.thumbnail_url,
+      active_preset: deepVideoState.active_preset,
+      error_code: deepVideoState.error_code,
+      error: deepVideoState.error,
+      scanned_at: deepVideoState.phase !== 'idle' && deepVideoState.phase !== 'checking'
+        ? (deepVideoState.scanned_at || Date.now())
+        : null,
+    },
   };
 }
 
@@ -1151,6 +1219,31 @@ async function restoreWorkspaceForCurrentTab(token = workspaceTabController.curr
       chip.setAttribute('aria-pressed', selected ? 'true' : 'false');
     });
     switchTab(activeResultTab, false);
+    // Restore deep video display state (not active jobs) if available
+    if (workspace.deepVideo && typeof DEEP_VIDEO_INITIAL_STATE !== 'undefined') {
+      var restoredDv = workspace.deepVideo;
+      // Only restore completed/error phases
+      if (restoredDv.phase === 'ready' || restoredDv.phase === 'error' || restoredDv.phase === 'completed') {
+        deepVideoState = {
+          phase: restoredDv.phase,
+          generation: typeof restoredDv.generation === 'number' ? restoredDv.generation : 0,
+          source_url: restoredDv.source_url,
+          media_id: restoredDv.media_id,
+          title: restoredDv.title,
+          provider: restoredDv.provider,
+          presets: restoredDv.presets,
+          thumbnail_url: restoredDv.thumbnail_url,
+          active_preset: restoredDv.active_preset,
+          progress_percent: null,
+          destination: null,
+          error_code: restoredDv.error_code,
+          error: restoredDv.error,
+          scanned_at: restoredDv.scanned_at,
+          active_job_id: null,
+        };
+        renderDeepVideo(deepVideoState);
+      }
+    }
     updateUI();
     updateSelectionToolbar();
     setScrapeButtonLabel('Rescrape');

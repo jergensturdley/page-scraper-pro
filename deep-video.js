@@ -46,6 +46,8 @@ var DEEP_VIDEO_INITIAL_STATE = Object.freeze({
   error: null,
   // Internal: tracks the native-messaging job correlation ID
   active_job_id: null,
+  // Timestamp of last successful scan (for session persistence)
+  scanned_at: null,
 });
 
 function reduceDeepVideoState(state, action) {
@@ -86,6 +88,7 @@ function reduceDeepVideoState(state, action) {
       // Guard: only accept results when in 'checking' phase
       if (state.phase !== 'checking') break;
       next.phase = 'ready';
+      next.scanned_at = Date.now();
       next.media_id = safeString(action.payload && action.payload.media_id) || state.media_id;
       next.title = safeString(action.payload && action.payload.title) || null;
       next.provider = safeString(action.payload && action.payload.provider) || state.provider;
