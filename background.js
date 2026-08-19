@@ -1,11 +1,17 @@
 // ─── Deep Video Native Helper Bridge ───────────────────────────────────────────
 
-// Load the native client module synchronously at the top of the service worker.
-importScripts('native-client.js');
-
 var _nativeClient = null;
+var _nativeAvailable = false;
+
+try {
+  importScripts('native-client.js');
+  _nativeAvailable = typeof PageScraperNative !== 'undefined';
+} catch (err) {
+  console.warn('Native client failed to load:', err.message);
+}
 
 function getNativeClient() {
+  if (!_nativeAvailable) return null;
   if (!_nativeClient) {
     _nativeClient = new PageScraperNative.NativeHostClient({
       runtime: chrome.runtime,
@@ -22,12 +28,16 @@ function getNativeClient() {
  */
 chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   if (message && message.action === 'deepVideoCommand') {
+    if (!_nativeAvailable) {
+      sendResponse({ error: 'native_unavailable' });
+      return false;
+    }
     var cmd = message.command;
     var payload = message.payload || {};
     if (!PageScraperNative.ALLOWED_COMMANDS ||
         !PageScraperNative.ALLOWED_COMMANDS.includes(cmd)) {
       sendResponse({ error: 'unknown_command' });
-      return;
+      return false;
     }
     getNativeClient().send(cmd, payload).then(function(result) {
       sendResponse({ ok: true, data: result });
@@ -38,8 +48,8 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   }
 
   if (message && message.action === 'deepVideoStatus') {
-    var snap = getNativeClient().snapshot();
-    sendResponse({ ok: true, snapshot: snap });
+    var client = getNativeClient();
+    sendResponse({ ok: !!client, snapshot: client ? client.snapshot() : null });
     return false;
   }
 });
@@ -51,7 +61,13 @@ function broadcastDeepVideoEvent(event) {
   });
 }
 
-getNativeClient().subscribe(broadcastDeepVideoEvent);
+if (_nativeAvailable) {
+  try {
+    getNativeClient().subscribe(broadcastDeepVideoEvent);
+  } catch (err) {
+    console.warn('Deep video native helper unavailable:', err.message);
+  }
+}
 
 // Background script for Page Scraper Pro
 
