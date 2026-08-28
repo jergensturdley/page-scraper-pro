@@ -152,7 +152,7 @@
 
 - [ ] **Step 1: Add a manual checklist.** Document reload, popup/side-panel widths, success/failure/retry, settings filtering/navigation toggle, malicious-looking iframe dimensions, YouTube/Vimeo embeds, JSON full URL, clipboard denial, keyboard tabs/dialogs, downloads, and reduced motion.
 - [ ] **Step 2: Run all automated checks.** Run: `npm test -- --runInBand && node --check popup.js && node --check background.js && node --check content.js`. Expected: all Jest tests pass and all syntax checks exit 0.
-- [ ] **Step 3: Run the design detector.** Run: `node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html`. Expected: exit 0 or only reviewed false positives; fix any valid finding before proceeding.
+- [ ] **Step 3: Run the design detector.** Run: `node ~/.agents/skills/impeccable/scripts/detect.mjs --json popup.html`. Expected: exit 0 or only reviewed false positives; fix any valid finding before proceeding.
 - [ ] **Step 4: Review the final diff.** Run: `git diff --check HEAD~8..HEAD && git status --short`. Expected: no whitespace errors and only intended tracked changes.
 - [ ] **Step 5: Commit verification documentation.** Run: `git add TESTING.md && git commit -m "Expand extension QA checklist"`.
 

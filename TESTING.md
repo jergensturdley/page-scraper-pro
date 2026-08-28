@@ -15,7 +15,7 @@ Run from the repository root. These are the results recorded for the Task 10 ver
 | `node --check deep-video.js` | PASS |
 | `node --check native-client.js` | PASS |
 | `node --check libs/fflate.umd.js` | PASS |
-| `node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html` | PASS — `[]` (no findings) |
+| `node ~/.agents/skills/impeccable/scripts/detect.mjs --json popup.html` | PASS — `[]` (no findings) |
 | `python3 -m unittest discover -s native_host/tests -v` | PASS — 193 tests |
 | Installer offline-test-fixture lifecycle (`PAGE_SCRAPER_TEST_HOME`) | PASS — install → healthcheck → uninstall in temp HOME, no residual files |
 | `node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json')); if(m.host_permissions||m.content_scripts) process.exit(1); if(!m.permissions.includes('nativeMessaging')) process.exit(1)"` | PASS |

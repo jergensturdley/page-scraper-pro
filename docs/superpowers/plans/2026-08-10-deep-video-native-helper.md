@@ -669,7 +669,7 @@ Run:
 npm test -- --runInBand
 node --check deep-video.js
 node --check popup.js
-node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html
+node ~/.agents/skills/impeccable/scripts/detect.mjs --json popup.html
 git add deep-video.js popup.html popup.js styles.css tests/popup.test.js
 git commit -m "Add accessible deep video workspace"
 ```
@@ -773,7 +773,7 @@ node --check deep-video.js
 node --check popup.js
 node --check background.js
 node --check libs/fflate.umd.js
-node /Users/jhonniey/.agents/skills/impeccable/scripts/detect.mjs --json popup.html
+node ~/.agents/skills/impeccable/scripts/detect.mjs --json popup.html
 node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json')); if(m.host_permissions||m.content_scripts) process.exit(1); if(!m.permissions.includes('nativeMessaging')) process.exit(1)"
 git diff --check
 git status --short
