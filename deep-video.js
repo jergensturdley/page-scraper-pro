@@ -148,8 +148,26 @@ function reduceDeepVideoState(state, action) {
       }
       break;
 
+    case 'job': {
+      // Bind the helper's job id so progress events can be correlated with
+      // the download started by this popup instance.
+      var jobId = safeString(action.payload && action.payload.job_id);
+      if (!jobId) break;
+      next.active_job_id = jobId;
+      // A helper-driven resume (e.g. popup reopened mid-download) can move
+      // the UI into 'downloading' when the snapshot confirms an active job.
+      if (action.payload && action.payload.state === 'downloading' &&
+          (state.phase === 'idle' || state.phase === 'checking' ||
+           state.phase === 'ready' || state.phase === 'downloading')) {
+        next.phase = 'downloading';
+        if (typeof next.progress_percent !== 'number') next.progress_percent = 0;
+      }
+      break;
+    }
+
     case 'failed':
-      if (state.phase === 'downloading') {
+      // Scan failures arrive while 'checking'; download failures while 'downloading'.
+      if (state.phase === 'downloading' || state.phase === 'checking') {
         next.phase = 'error';
         next.error_code = safeString(action.payload && action.payload.error_code);
         next.error = safeString(action.payload && action.payload.error);

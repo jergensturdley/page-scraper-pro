@@ -52,7 +52,11 @@ async function sendDeepVideoCommand(command, payload) {
       if (response && response.ok) {
         resolve(response.data);
       } else {
-        reject(new Error(response && response.error ? String(response.error) : 'Unknown error'));
+        var failure = new Error(response && response.error ? String(response.error) : 'Unknown error');
+        if (response && typeof response.error_code === 'string') {
+          failure.code = response.error_code;
+        }
+        reject(failure);
       }
     });
   });
@@ -857,6 +861,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Translate native state into deep-video events
       if (snap.state === 'downloading' && snap.job_id) {
         deepVideoState = reduceDeepVideoState(deepVideoState, {
+          type: 'job',
+          payload: { job_id: snap.job_id, state: 'downloading' }
+        });
+        deepVideoState = reduceDeepVideoState(deepVideoState, {
           type: 'progress',
           payload: { job_id: snap.job_id, percent: typeof snap.percent === 'number' ? snap.percent : 0 }
         });
@@ -908,12 +916,16 @@ document.addEventListener('DOMContentLoaded', async () => {
           payload: normalizeDeepVideoResult(result)
         });
       } catch (err) {
-        if (err.message && err.message.includes('not installed')) {
+        var scanMessage = err && err.message ? String(err.message) : 'Unknown error';
+        var scanCode = err && err.code ? String(err.code) : '';
+        var helperMissing = scanCode === 'helper_unavailable' || scanCode === 'native_unavailable' ||
+          /helper_unavailable|native_unavailable|helper unavailable|not installed|messaging host not found|host not found/i.test(scanMessage);
+        if (helperMissing) {
           deepVideoState = reduceDeepVideoState(deepVideoState, { type: 'helper_unavailable', payload: {} });
         } else {
           deepVideoState = reduceDeepVideoState(deepVideoState, {
             type: 'failed',
-            payload: { error_code: 'scan_failed', error: err.message }
+            payload: { error_code: 'scan_failed', error: scanMessage }
           });
         }
       }
@@ -933,19 +945,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderDeepVideo(deepVideoState);
       lastDeepVideoSafeAction = { type: 'download', payload: { preset: preset } };
       try {
-        await sendDeepVideoCommand('download', {
+        var ack = await sendDeepVideoCommand('download', {
           media_id: deepVideoState.media_id,
           preset: preset,
           confirmed: true
         });
-        deepVideoState = reduceDeepVideoState(deepVideoState, {
-          type: 'completed',
-          payload: {}
-        });
+        // The ack only confirms the job was accepted; completion and
+        // progress arrive as broadcast events from the helper.  Bind the
+        // helper's job id so those events correlate with this download.
+        var ackJobId = ack && typeof ack === 'object' && typeof ack.job_id === 'string' ? ack.job_id : null;
+        if (ackJobId) {
+          deepVideoState = reduceDeepVideoState(deepVideoState, {
+            type: 'job',
+            payload: { job_id: ackJobId }
+          });
+        }
       } catch (err) {
         deepVideoState = reduceDeepVideoState(deepVideoState, {
           type: 'failed',
-          payload: { error_code: 'download_failed', error: err.message }
+          payload: {
+            error_code: (err && err.code) || 'download_failed',
+            error: err && err.message ? String(err.message) : 'Download failed'
+          }
         });
       }
       renderDeepVideo(deepVideoState);
@@ -1650,67 +1671,136 @@ function scrapePageFromContentFallback(scrapeSettings) {
   });
   
   // Comprehensive video selection
-  const videoElements = document.querySelectorAll('video, source[src$=".mp4"], source[src$=".webm"], source[src$=".ogg"], source[src$=".mov"], iframe[src*="youtube"], iframe[src*="vimeo"], iframe[src*="dailymotion"], video source');
-  
-  videoElements.forEach(video => {
-    let src = '';
-    let type = '';
-    let width = 0;
-    let height = 0;
-    let poster = '';
-    
-    if (video.tagName === 'VIDEO') {
-      src = video.src || video.querySelector('source')?.src || '';
-      width = video.videoWidth || video.width || video.getAttribute('width') || 0;
-      height = video.videoHeight || video.height || video.getAttribute('height') || 0;
-      poster = video.poster || '';
-      type = 'video';
-    } else if (video.tagName === 'SOURCE') {
-      src = video.src;
-      const parentVideo = video.closest('video');
-      if (parentVideo) {
-        width = parentVideo.videoWidth || parentVideo.width || 0;
-        height = parentVideo.videoHeight || parentVideo.height || 0;
-        poster = parentVideo.poster || '';
+  const videoExtensionRe = /\.(mp4|webm|ogv|mov|m4v|avi|mkv|flv|wmv|ts|m3u8|mpd)(?=$|[?#])/i;
+  const audioExtensionRe = /\.(mp3|wav|ogg|oga|opus|flac|aac|m4a|wma|weba)(?=$|[?#])/i;
+  const streamManifestRe = /\.(m3u8|mpd)(?=$|[?#])/i;
+  const videoProviderRe = /\/\/(?:[\w-]+\.)*(?:youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|dailymotion\.com|dai\.ly|twitch\.tv|tiktok\.com|twitter\.com|x\.com|facebook\.com|fb\.watch|streamable\.com|wistia\.(?:com|net)|brightcovecdn\.com)(?=$|[:/?#])/i;
+  const toFiniteNumber = value => {
+    const numeric = typeof value === 'string' ? Number(value.trim()) : value;
+    return typeof numeric === 'number' && Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0;
+  };
+  const safeAttribute = (el, name) => {
+    if (!el || typeof el.getAttribute !== 'function') return '';
+    try { return el.getAttribute(name) || ''; } catch (error) { return ''; }
+  };
+  const mediaSourceAttributes = el => {
+    if (!el || typeof el !== 'object') return '';
+    const dataset = el.dataset && typeof el.dataset === 'object' ? el.dataset : {};
+    return el.currentSrc || el.src || el.data || dataset.src || dataset.srcWebm || dataset.original ||
+      safeAttribute(el, 'src') || safeAttribute(el, 'data-src') || safeAttribute(el, 'data') || '';
+  };
+  const addVideo = (rawSrc, type, width, height, poster) => {
+    if (typeof rawSrc !== 'string') return;
+    const src = rawSrc.trim();
+    if (!src || src.startsWith('data:')) return;
+    if (videos.some(v => v.src === src)) return;
+    videos.push({
+      src,
+      type,
+      width: toFiniteNumber(width),
+      height: toFiniteNumber(height),
+      poster: typeof poster === 'string' ? poster : ''
+    });
+  };
+
+  // <video> elements: resolved src, lazy-load data attributes, and every child <source>
+  document.querySelectorAll('video').forEach(video => {
+    const width = video.videoWidth || video.width || 0;
+    const height = video.videoHeight || video.height || 0;
+    const poster = typeof video.poster === 'string' ? video.poster : '';
+    const primary = mediaSourceAttributes(video);
+    if (primary) addVideo(primary, 'video', width, height, poster);
+    const childSources = typeof video.querySelectorAll === 'function' ? video.querySelectorAll('source') : [];
+    childSources.forEach(source => {
+      const src = mediaSourceAttributes(source);
+      const sourceType = typeof source.type === 'string' ? source.type : '';
+      if (!src) return;
+      if (videoExtensionRe.test(src) || /\.ogg(?=$|[?#])/i.test(src) || /^video\//i.test(sourceType)) {
+        addVideo(src, 'video', width, height, poster);
       }
-      type = 'video';
-    } else if (video.tagName === 'IFRAME') {
-      src = video.src;
-      width = video.width || video.getAttribute('width') || 0;
-      height = video.height || video.getAttribute('height') || 0;
-      type = 'embed';
-    }
-    
+    });
+  });
+
+  // Standalone <source> elements outside media tags (video type or video-only extension)
+  document.querySelectorAll('source').forEach(source => {
+    try {
+      if (typeof source.closest === 'function' && source.closest('video, audio')) return;
+    } catch (error) { /* selector unsupported */ }
+    const src = mediaSourceAttributes(source);
+    const sourceType = typeof source.type === 'string' ? source.type : '';
     if (!src) return;
-    
-    if (!videos.some(v => v.src === src)) {
-      videos.push({ src, type, width, height, poster });
-    }
+    if (videoExtensionRe.test(src) || /^video\//i.test(sourceType)) addVideo(src, 'video', 0, 0, '');
+  });
+
+  // Embedded players: iframes, embeds, and objects for known providers or video files
+  document.querySelectorAll('iframe, embed, object').forEach(embed => {
+    const src = mediaSourceAttributes(embed);
+    if (!src || typeof src !== 'string') return;
+    const embedType = typeof embed.type === 'string' ? embed.type : '';
+    if (!videoProviderRe.test(src) && !videoExtensionRe.test(src) && !/^video\//i.test(embedType)) return;
+    const width = safeAttribute(embed, 'width') || embed.width || 0;
+    const height = safeAttribute(embed, 'height') || embed.height || 0;
+    addVideo(src, 'embed', width, height, '');
+  });
+
+  // Open Graph and Twitter player stream metadata
+  document.querySelectorAll(
+    'meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"], meta[name="twitter:video"]'
+  ).forEach(meta => {
+    const content = typeof meta.content === 'string' ? meta.content.trim() : '';
+    if (content) addVideo(content, 'video', 0, 0, '');
+  });
+
+  // Preloaded video hints
+  document.querySelectorAll('link[rel="preload"][as="video"]').forEach(link => {
+    if (typeof link.href === 'string' && link.href) addVideo(link.href, 'video', 0, 0, '');
+  });
+
+  // Direct links to video files and adaptive-stream manifests (query strings tolerated)
+  document.querySelectorAll('a[href]').forEach(link => {
+    const href = typeof link.href === 'string' ? link.href : '';
+    if (!href || audioExtensionRe.test(href) && !videoExtensionRe.test(href)) return;
+    if (!videoExtensionRe.test(href)) return;
+    addVideo(href, streamManifestRe.test(href) ? 'stream' : 'link', 0, 0, '');
   });
 
   // Comprehensive audio selection
-  document.querySelectorAll('audio, audio source, source[src$=".mp3"], source[src$=".wav"], source[src$=".ogg"], source[src$=".flac"], source[src$=".aac"], source[src$=".m4a"], source[src$=".opus"], source[src$=".wma"]').forEach(el => {
-    let src = '';
-    let type = 'audio';
+  const addAudio = (rawSrc, type) => {
+    if (typeof rawSrc !== 'string') return;
+    const src = rawSrc.trim();
+    if (!src || src.startsWith('data:')) return;
+    if (audios.some(a => a.src === src)) return;
+    audios.push({ src, type });
+  };
 
-    if (el.tagName === 'AUDIO') {
-      src = el.src || el.querySelector('source')?.src || '';
-    } else if (el.tagName === 'SOURCE') {
-      src = el.src;
-    }
-
-    if (!src) return;
-
-    if (!audios.some(a => a.src === src)) {
-      audios.push({ src, type });
-    }
+  // <audio> elements: resolved src, lazy-load data attributes, and every child <source>
+  document.querySelectorAll('audio').forEach(audio => {
+    const primary = mediaSourceAttributes(audio);
+    if (primary) addAudio(primary, 'audio');
+    const childSources = typeof audio.querySelectorAll === 'function' ? audio.querySelectorAll('source') : [];
+    childSources.forEach(source => {
+      const src = mediaSourceAttributes(source);
+      const sourceType = typeof source.type === 'string' ? source.type : '';
+      if (!src) return;
+      if (audioExtensionRe.test(src) || /^audio\//i.test(sourceType)) addAudio(src, 'audio');
+    });
   });
 
-  document.querySelectorAll('a[href$=".mp3"], a[href$=".wav"], a[href$=".ogg"], a[href$=".flac"], a[href$=".aac"], a[href$=".m4a"], a[href$=".opus"]').forEach(link => {
-    const src = link.href;
-    if (!audios.some(a => a.src === src)) {
-      audios.push({ src, type: 'link' });
-    }
+  // Standalone <source> elements outside media tags (audio type or audio extension)
+  document.querySelectorAll('source').forEach(source => {
+    try {
+      if (typeof source.closest === 'function' && source.closest('video, audio')) return;
+    } catch (error) { /* selector unsupported */ }
+    const src = mediaSourceAttributes(source);
+    const sourceType = typeof source.type === 'string' ? source.type : '';
+    if (!src) return;
+    if (audioExtensionRe.test(src) || /^audio\//i.test(sourceType)) addAudio(src, 'audio');
+  });
+
+  // Direct links to audio files (query strings tolerated)
+  document.querySelectorAll('a[href]').forEach(link => {
+    const href = typeof link.href === 'string' ? link.href : '';
+    if (href && audioExtensionRe.test(href)) addAudio(href, 'link');
   });
   
   document.querySelectorAll('a[href]').forEach(link => {
@@ -2037,7 +2127,7 @@ function renderVideos() {
       videoPreviewEl.preload = 'metadata';
     }
 
-    if (videoPreviewEl) {
+    if (videoPreviewEl && videoUrl) {
       const previewLink = document.createElement('a');
       previewLink.className = 'video-preview-link';
       previewLink.href = videoUrl;
@@ -2046,6 +2136,10 @@ function renderVideos() {
       previewLink.setAttribute('aria-label', 'Open video preview');
       previewLink.appendChild(videoPreviewEl);
       wrapper.appendChild(previewLink);
+    } else if (videoPreviewEl) {
+      // No safe URL to link to — show the preview without an anchor so a
+      // click cannot navigate the popup to an empty href.
+      wrapper.appendChild(videoPreviewEl);
     } else {
       const fallback = document.createElement('div');
       fallback.className = 'video-preview-fallback';
@@ -2137,8 +2231,13 @@ function renderAudios() {
         <polygon points="5 3 19 12 5 21 5 3"/>
       </svg>
     `;
+    playBtn.disabled = !audioUrl;
     playBtn.addEventListener('click', () => {
-      const audioEl = new Audio(audio.src);
+      if (!audioUrl) {
+        showToast('Could not play audio');
+        return;
+      }
+      const audioEl = new Audio(audioUrl);
       audioEl.play().catch(() => showToast('Could not play audio'));
     });
 
@@ -2283,8 +2382,9 @@ async function exportVideos() {
       const video = scrapedData.videos[i];
       let videoUrl = video.src;
       
-      // Skip embedded videos (YouTube, Vimeo, etc.) - can't download those directly
-      if (video.type === 'embed') {
+      // Skip embedded players and adaptive streams (m3u8/mpd) — those are
+      // not directly downloadable files.
+      if (video.type === 'embed' || video.type === 'stream') {
         continue;
       }
       
@@ -2302,7 +2402,9 @@ async function exportVideos() {
         continue;
       }
       
-      files.push({ url: videoUrl, filename: `video-${i + 1}.mp4` });
+      const extensionMatch = videoUrl.match(/\.(mp4|webm|mov|m4v|ogv|avi|mkv|flv|wmv)(?=$|[?#])/i);
+      const extension = extensionMatch ? `.${extensionMatch[1].toLowerCase()}` : '.mp4';
+      files.push({ url: videoUrl, filename: `video-${i + 1}${extension}` });
     }
 
     await requestDownloads(files, 'videos');

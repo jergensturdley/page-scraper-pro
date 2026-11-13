@@ -2519,3 +2519,218 @@ this.createZipFromUrls = createZipFromUrls;`, backgroundContext);
   });
 
 });
+
+describe('Deep video failure, job correlation, and scraper regressions', () => {
+  const deepVideo = require('../deep-video.js');
+
+  test('scan failure during checking transitions to error instead of staying stuck', () => {
+    const next = deepVideo.reduceDeepVideoState(
+      { phase: 'checking', generation: 1, source_url: 'https://example.com/video' },
+      { type: 'failed', payload: { error_code: 'scan_failed', error: 'boom' } }
+    );
+    expect(next.phase).toBe('error');
+    expect(next.error_code).toBe('scan_failed');
+  });
+
+  test('failed action from ready phase is still ignored', () => {
+    const next = deepVideo.reduceDeepVideoState(
+      { phase: 'ready', generation: 1, media_id: 'm' },
+      { type: 'failed', payload: {} }
+    );
+    expect(next.phase).toBe('ready');
+  });
+
+  test('job action binds active_job_id so later progress events correlate', () => {
+    let state = deepVideo.reduceDeepVideoState(
+      { phase: 'downloading', generation: 2, media_id: 'm', active_job_id: null, progress_percent: 0 },
+      { type: 'job', payload: { job_id: 'job-99' } }
+    );
+    expect(state.active_job_id).toBe('job-99');
+    state = deepVideo.reduceDeepVideoState(state, { type: 'progress', payload: { job_id: 'job-99', percent: 42 } });
+    expect(state.progress_percent).toBe(42);
+    const stale = deepVideo.reduceDeepVideoState(state, { type: 'progress', payload: { job_id: 'other', percent: 80 } });
+    expect(stale.progress_percent).toBe(42);
+  });
+
+  test('job action with downloading state bootstraps downloading phase from idle', () => {
+    const next = deepVideo.reduceDeepVideoState(
+      { phase: 'idle', generation: 1 },
+      { type: 'job', payload: { job_id: 'j', state: 'downloading' } }
+    );
+    expect(next.phase).toBe('downloading');
+    expect(next.progress_percent).toBe(0);
+  });
+
+  test('background translates native snapshots into reducer-shaped events', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    const fnStart = backgroundJs.indexOf('function snapshotToDeepVideoEvent');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = backgroundJs.indexOf('// Broadcast reducer-shaped', fnStart);
+    const context = {};
+    vm.runInNewContext(`${backgroundJs.slice(fnStart, fnEnd)}\nthis.map = snapshotToDeepVideoEvent;`, context);
+    const map = context.map;
+
+    expect(map(null)).toBeNull();
+    expect(map({ state: 'downloading' })).toBeNull(); // no job id -> ignored
+    expect(map({ job_id: 'j', state: 'downloading', percent: 33 })).toEqual({
+      type: 'progress', payload: { job_id: 'j', percent: 33, phase: 'downloading' },
+    });
+    expect(map({ job_id: 'j', state: 'completed' }).type).toBe('completed');
+    expect(map({ job_id: 'j', state: 'failed', error_code: 'network' }).payload.error_code).toBe('network');
+    expect(map({ job_id: 'j', error_code: 'helper_unavailable' }).type).toBe('failed');
+    expect(map({ job_id: 'j', state: 'cancelled' }).type).toBe('cancel');
+    expect(map({ job_id: 'j', state: 'queued' })).toBeNull();
+
+    // End-to-end: mapped events must apply through the popup reducer
+    let state = { phase: 'downloading', generation: 5, media_id: 'm', active_job_id: 'j', progress_percent: 0 };
+    state = deepVideo.reduceDeepVideoState(state, map({ job_id: 'j', state: 'downloading', percent: 66 }));
+    expect(state.progress_percent).toBe(66);
+    state = deepVideo.reduceDeepVideoState(state, map({ job_id: 'j', state: 'completed' }));
+    expect(state.phase).toBe('completed');
+  });
+
+  test('background forwards helper error codes and guards synchronous send failures', () => {
+    const backgroundJs = fs.readFileSync(backgroundJsPath, 'utf8');
+    expect(backgroundJs).toContain('error_code: err.code');
+    expect(backgroundJs).toContain('catch (syncError)');
+  });
+
+  test('popup binds the helper job id on download ack instead of claiming completion', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const domSection = popupJs.slice(popupJs.indexOf('document.addEventListener'));
+    const dlBtnIdx = domSection.indexOf('elements.deepVideoDownloadBtn');
+    const dlBlock = domSection.slice(dlBtnIdx, dlBtnIdx + 1200);
+    expect(dlBlock).toMatch(/type:\s*['"]job['"]/);
+    expect(dlBlock).not.toMatch(/type:\s*['"]completed['"]/);
+  });
+
+  test('popup maps helper-missing errors to installation guidance via code or message', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    expect(popupJs).toMatch(/messaging host not found/);
+    expect(popupJs).toMatch(/failure\.code = response\.error_code/);
+  });
+
+  describe('video and audio media detection', () => {
+    function el(tag, props = {}, children = []) {
+      return {
+        tagName: tag.toUpperCase(),
+        dataset: props.dataset || {},
+        src: props.src || '',
+        type: props.type || '',
+        poster: props.poster || '',
+        videoWidth: props.videoWidth || 0,
+        videoHeight: props.videoHeight || 0,
+        width: props.width || 0,
+        height: props.height || 0,
+        content: props.content || '',
+        href: props.href || '',
+        innerText: '',
+        getAttribute: name => (props.attrs && name in props.attrs) ? props.attrs[name] : null,
+        closest: selector => selector === 'video, audio' && props.parentTag ? { tagName: props.parentTag.toUpperCase() } : null,
+        querySelectorAll: selector => selector === 'source' ? children : []
+      };
+    }
+
+    function loadScraper(fixtures) {
+      const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+      const start = popupJs.indexOf('function scrapePageFromContentFallback(');
+      const end = popupJs.indexOf('// Render images', start);
+      const scraperDocument = {
+        querySelectorAll(selector) {
+          if (selector.startsWith('img[')) return fixtures.images || [];
+          if (selector === 'video') return fixtures.videos || [];
+          if (selector === 'audio') return fixtures.audios || [];
+          if (selector === 'source') return fixtures.sources || [];
+          if (selector === 'iframe, embed, object') return fixtures.embeds || [];
+          if (selector.startsWith('meta[')) return fixtures.metas || [];
+          if (selector.startsWith('link[rel="preload"]')) return fixtures.preloads || [];
+          if (selector === 'a[href]') return fixtures.links || [];
+          return [];
+        },
+        body: { cloneNode: () => ({ querySelectorAll: () => [], innerText: '' }) }
+      };
+      const context = { document: scraperDocument };
+      vm.runInNewContext(`${popupJs.slice(start, end)}\nthis.scrape = scrapePageFromContentFallback;`, context);
+      return context.scrape({});
+    }
+
+    const page = () => ({
+      videos: [el('video', {
+        src: 'https://cdn.example/clip.mp4?token=abc',
+        poster: 'https://cdn.example/poster.jpg',
+        videoWidth: 1280,
+        videoHeight: 720
+      }, [
+        el('source', { src: 'https://cdn.example/clip.webm?token=abc', type: 'video/webm' }),
+        el('source', { src: 'https://cdn.example/clip.ogg', type: 'video/ogg' })
+      ])],
+      audios: [el('audio', {}, [el('source', { src: 'https://cdn.example/track.ogg' })])],
+      sources: [
+        el('source', { src: 'https://cdn.example/loose.mov?v=2' }),
+        el('source', { src: 'https://cdn.example/loose.mp3', type: 'audio/mpeg' })
+      ],
+      embeds: [
+        el('iframe', { src: 'https://www.twitch.tv/embed?channel=x', attrs: { width: '100%', height: '640' } }),
+        el('iframe', { src: 'https://notyoutube.com/embed/evil' }),
+        el('iframe', { src: 'https://www.youtube.com/embed/abc', attrs: { width: '560', height: '315' } })
+      ],
+      metas: [el('meta', { content: 'https://cdn.example/og.mp4' })],
+      preloads: [el('link', { href: 'https://cdn.example/preloaded.mp4' })],
+      links: [
+        { href: 'https://cdn.example/movie.mp4', innerText: '', closest: () => null },
+        { href: 'https://cdn.example/master.m3u8?key=1', innerText: '', closest: () => null },
+        { href: 'https://cdn.example/song.mp3?list=1', innerText: '', closest: () => null }
+      ]
+    });
+
+    test('detects query-string media URLs that attribute suffix selectors miss', () => {
+      const result = loadScraper(page());
+      const srcs = result.videos.map(video => video.src);
+      expect(srcs).toContain('https://cdn.example/clip.mp4?token=abc');
+      expect(srcs).toContain('https://cdn.example/clip.webm?token=abc');
+      expect(srcs).toContain('https://cdn.example/loose.mov?v=2');
+    });
+
+    test('ogg sources are attributed to their parent media element only', () => {
+      const result = loadScraper(page());
+      expect(result.videos.some(video => video.src === 'https://cdn.example/clip.ogg')).toBe(true);
+      expect(result.audios.some(audio => audio.src === 'https://cdn.example/clip.ogg')).toBe(false);
+      expect(result.audios.some(audio => audio.src === 'https://cdn.example/track.ogg')).toBe(true);
+      expect(result.videos.some(video => video.src === 'https://cdn.example/track.ogg')).toBe(false);
+    });
+
+    test('recognizes more embed providers and rejects lookalike hosts', () => {
+      const result = loadScraper(page());
+      const embeds = result.videos.filter(video => video.type === 'embed').map(video => video.src);
+      expect(embeds).toContain('https://www.twitch.tv/embed?channel=x');
+      expect(embeds).toContain('https://www.youtube.com/embed/abc');
+      expect(embeds).not.toContain('https://notyoutube.com/embed/evil');
+    });
+
+    test('collects og:video metadata, preload hints, and stream manifests with correct types', () => {
+      const result = loadScraper(page());
+      expect(result.videos.some(video => video.src === 'https://cdn.example/og.mp4')).toBe(true);
+      expect(result.videos.some(video => video.src === 'https://cdn.example/preloaded.mp4')).toBe(true);
+      const manifest = result.videos.find(video => video.src === 'https://cdn.example/master.m3u8?key=1');
+      expect(manifest).toBeDefined();
+      expect(manifest.type).toBe('stream');
+      expect(result.audios.some(audio => audio.src === 'https://cdn.example/song.mp3?list=1')).toBe(true);
+    });
+
+    test('coerces non-numeric embed dimension attributes to zero', () => {
+      const result = loadScraper(page());
+      const twitch = result.videos.find(video => video.src.includes('twitch'));
+      expect(twitch.width).toBe(0);
+      expect(twitch.height).toBe(640);
+    });
+  });
+
+  test('video preview is only wrapped in an anchor when a safe URL exists', () => {
+    const popupJs = fs.readFileSync(popupJsPath, 'utf8');
+    const start = popupJs.indexOf('function renderVideos()');
+    const end = popupJs.indexOf('// Render audios', start);
+    const source = popupJs.slice(start, end);
+    expect(source).toContain('if (videoPreviewEl && videoUrl) {');
+    expect(source).toContain('previewLink.href = videoUrl;');
+  });
+});
