@@ -39,10 +39,25 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
       sendResponse({ error: 'unknown_command' });
       return false;
     }
-    getNativeClient().send(cmd, payload).then(function(result) {
+    var sendPromise;
+    try {
+      sendPromise = Promise.resolve(getNativeClient().send(cmd, payload));
+    } catch (syncError) {
+      sendResponse({
+        ok: false,
+        error: syncError.message || String(syncError),
+        error_code: syncError.code || 'send_failed'
+      });
+      return false;
+    }
+    sendPromise.then(function(result) {
       sendResponse({ ok: true, data: result });
     }).catch(function(err) {
-      sendResponse({ ok: false, error: err.message || String(err) });
+      sendResponse({
+        ok: false,
+        error: err.message || String(err),
+        error_code: err.code || 'helper_error'
+      });
     });
     return true; // async sendResponse
   }
@@ -54,8 +69,47 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   }
 });
 
-// Broadcast snapshot updates to all popup instances.
-function broadcastDeepVideoEvent(event) {
+/**
+ * Translate a native client snapshot into a deep-video reducer event.
+ * The popup reducer only understands { type, payload } actions, so raw
+ * snapshots must never be broadcast directly.  Snapshots without an active
+ * job id are ignored so stray lifecycle updates cannot overwrite state.
+ */
+function snapshotToDeepVideoEvent(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  var jobId = typeof snapshot.job_id === 'string' && snapshot.job_id ? snapshot.job_id : null;
+  if (!jobId) return null;
+  var state = typeof snapshot.state === 'string' ? snapshot.state : '';
+  var errorCode = typeof snapshot.error_code === 'string' ? snapshot.error_code : null;
+  if (errorCode === 'helper_unavailable') {
+    return { type: 'failed', payload: { job_id: jobId, error_code: 'helper_unavailable', error: null } };
+  }
+  if (state === 'completed') {
+    return { type: 'completed', payload: { job_id: jobId } };
+  }
+  if (state === 'failed') {
+    return { type: 'failed', payload: { job_id: jobId, error_code: errorCode || 'download_failed', error: null } };
+  }
+  if (state === 'cancelled' || state === 'canceled') {
+    return { type: 'cancel', payload: {} };
+  }
+  if (state === 'downloading' || state === 'merging' || state === 'postprocessing') {
+    return {
+      type: 'progress',
+      payload: {
+        job_id: jobId,
+        percent: typeof snapshot.percent === 'number' ? snapshot.percent : 0,
+        phase: 'downloading'
+      }
+    };
+  }
+  return null;
+}
+
+// Broadcast reducer-shaped events derived from native snapshot updates.
+function broadcastDeepVideoEvent(snapshot) {
+  var event = snapshotToDeepVideoEvent(snapshot);
+  if (!event) return;
   chrome.runtime.sendMessage({ action: 'deepVideoEvent', event }).catch(function() {
     // Silently ignore "receiving end does not exist" when popup is closed.
   });
