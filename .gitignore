@@ -44,4 +44,8 @@ snapshots/
 # Extension packaging
 *.zip
 *.crx
-native_host/tests/__pycache__/__init__.cpython-314.pyc
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
